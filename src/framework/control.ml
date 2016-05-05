@@ -485,7 +485,7 @@ struct
 
     let local_xml = ref (Result.create 0) in
     let global_xml = ref (GHT.create 0) in
-    let do_analyze_using_solver () =
+    let do_analyze_using_solver (): unit =
       let lh, gh = Stats.time "solving" (Slvr.solve entrystates []) startvars' in
 
       if not (get_string "comparesolver"="") then begin
@@ -539,38 +539,7 @@ struct
          Printf.printf "NB! Execution does not reach the end of Main.\n");
 
       if get_bool "dump_globs" then
-        print_globals gh;
-
-      (* run activated transformations with the analysis result *)
-      let ask loc =
-        let open Batteries in let open Enum in
-        (* first join all contexts *)
-        let joined =
-          LHT.enum lh |> map (Tuple2.map1 fst) (* drop context from key *)
-          |> group fst (* group by key=node *)
-          |> map (reduce (fun (k,a) (_,b) -> k, Spec.D.join a b))
-          (* also, in cil visitors we only have the location, so we use that as the key *)
-          |> map (Tuple2.map1 MyCFG.getLoc)
-          |> Hashtbl.of_enum
-        in
-        (* build a ctx for using the query system *)
-        let rec ctx =
-          { ask    = query
-          ; local  = Hashtbl.find joined loc
-          ; global = GHT.find gh
-          ; presub = []
-          ; postsub= []
-          ; spawn  = (fun v d    -> failwith "Cannot \"spawn\" in query context.")
-          ; split  = (fun d e tv -> failwith "Cannot \"split\" in query context.")
-          ; sideg  = (fun v g    -> failwith "Cannot \"split\" in query context.")
-          ; assign = (fun ?name _ -> failwith "Cannot \"assign\" in query context.")
-          }
-        and query x = Spec.query ctx x in
-        Spec.query ctx
-      in
-      get_list "trans.activated" |> List.map Json.string
-      |> List.iter (fun name -> Transform.run name ask file)
-      (* Transform.PartialEval.transform ask file *)
+        print_globals gh
     in
 
     let do_analyze_using_iterator () =

@@ -783,7 +783,6 @@ struct
       | `Union n ->  ValueDomain.Unions.is_bot n
       | `Array n ->  ValueDomain.CArrays.is_bot n
       | `Blob n ->  ValueDomain.Blobs.is_bot n
-      | `List n ->  ValueDomain.Lists.is_bot n
       | `Bot -> false (* HACK: bot is here due to typing conflict (we do not cast approprietly) *)
       | `Top -> false
     in
@@ -875,12 +874,6 @@ struct
       | _ -> None
     in
     match is_list_init () with
-    | Some a when (get_bool "exp.list-type") ->
-      begin
-        set ctx.ask ctx.global ctx.local
-          (AD.singleton (Addr.from_var a))
-          (`List (ValueDomain.Lists.bot ()))
-      end
     | _ ->
       let rval_val = eval_rv_with_query ctx.ask ctx.global ctx.local rval in
       let lval_val = eval_lv ctx.ask ctx.global ctx.local lval in
@@ -1033,7 +1026,6 @@ struct
        * join all its values. *)
       | `Array a -> reachable_from_value (ValueDomain.CArrays.get a (IdxDom.top ()))
       | `Blob e -> reachable_from_value e
-      | `List e -> reachable_from_value (`Address (ValueDomain.Lists.entry_rand e))
       | `Struct s -> ValueDomain.Structs.fold (fun k v acc -> AD.join (reachable_from_value v) acc) s empty
       | `Int _ -> empty
     in
@@ -1226,7 +1218,6 @@ struct
         | `Union (t,e) -> with_field (reachable_from_value e) t
         | `Array a -> reachable_from_value (ValueDomain.CArrays.get a (IdxDom.top ()))
         | `Blob e -> reachable_from_value e
-        | `List e -> reachable_from_value (`Address (ValueDomain.Lists.entry_rand e))
         | `Struct s ->
           let join_tr (a1,t1,_) (a2,t2,_) = AD.join a1 a2, TS.join t1 t2, false in
           let f k v =
@@ -1519,45 +1510,6 @@ struct
           let dst_lval = mkMem ~addr:dst ~off:NoOffset in
           assign ctx dst_lval data (* this is only ok because we use ArrayDomain.Trivial per default, i.e., there's no difference between the first element or the whole array *)
         | _ -> M.bailwith "memset arguments are strange/complicated."
-      end
-    | `Unknown "list_add" when (get_bool "exp.list-type") ->
-      begin match args with
-        | [ AddrOf (Var elm,next);(AddrOf (Var lst,NoOffset))] ->
-          begin
-            let ladr = AD.singleton (Addr.from_var lst) in
-            match get ctx.ask ctx.global ctx.local ladr with
-            | `List ld ->
-              let eadr = AD.singleton (Addr.from_var elm) in
-              let eitemadr = AD.singleton (Addr.from_var_offset (elm, convert_offset ctx.ask ctx.global ctx.local next)) in
-              let new_list = `List (ValueDomain.Lists.add eadr ld) in
-              let s1 = set ctx.ask ctx.global ctx.local ladr new_list in
-              let s2 = set ctx.ask ctx.global s1 eitemadr (`Address (AD.singleton (Addr.from_var lst))) in
-              s2
-            | _ -> set ctx.ask ctx.global ctx.local ladr `Top
-          end
-        | _ -> M.bailwith "List function arguments are strange/complicated."
-      end
-    | `Unknown "list_del" when (get_bool "exp.list-type") ->
-      begin match args with
-        | [ AddrOf (Var elm,next) ] ->
-          begin
-            let eadr = AD.singleton (Addr.from_var elm) in
-            let lptr = AD.singleton (Addr.from_var_offset (elm, convert_offset ctx.ask ctx.global ctx.local next)) in
-            let lprt_val = get ctx.ask ctx.global ctx.local lptr in
-            let lst_poison = `Address (AD.singleton (Addr.from_var ListDomain.list_poison)) in
-            let s1 = set ctx.ask ctx.global ctx.local lptr (VD.join lprt_val lst_poison) in
-            match get ctx.ask ctx.global ctx.local lptr with
-            | `Address ladr -> begin
-                match get ctx.ask ctx.global ctx.local ladr with
-                | `List ld ->
-                  let del_ls = ValueDomain.Lists.del eadr ld in
-                  let s2 = set ctx.ask ctx.global s1 ladr (`List del_ls) in
-                  s2
-                | _ -> s1
-              end
-            | _ -> s1
-          end
-        | _ -> M.bailwith "List function arguments are strange/complicated."
       end
     | `Unknown "__builtin" ->
       begin match args with

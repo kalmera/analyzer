@@ -2,7 +2,7 @@ open Cil
 open Pretty
 (*module ID: IntDomain.ExclList = IntDomain.None*)
 (* module ID: IntDomain.S = IntDomain.Trier   *)
-module ID: IntDomain.S = IntDomain.IntDomTuple
+module ID: IntDomain.S = IntDomain.Trier
 module IndexDomain: IntDomain.S = ID
 (* module ID: IntDomain.S = IntDomain.IncExcInterval *)
 module AD = AddressDomain.AddressSet (IndexDomain)
@@ -49,7 +49,6 @@ module rec Compound: S with type t = [
     | `Union of Unions.t
     | `Array of CArrays.t
     | `Blob of Blobs.t
-    | `List of Lists.t
     | `Bot
   ] and type offs = (fieldinfo,IndexDomain.t) Lval.offs =
 struct
@@ -61,7 +60,6 @@ struct
     | `Union of Unions.t
     | `Array of CArrays.t
     | `Blob of Blobs.t
-    | `List of Lists.t
     | `Bot
   ]
 
@@ -114,7 +112,6 @@ struct
       | `Union _ -> 6
       | `Array _ -> 7
       | `Blob _ -> 9
-      | `List _ -> 10
       | `Top -> 100
     in match x,y with
     | `Int x, `Int y -> ID.compare x y
@@ -122,7 +119,6 @@ struct
     | `Struct x, `Struct y -> Structs.compare x y
     | `Union x, `Union y -> Unions.compare x y
     | `Array x, `Array y -> CArrays.compare x y
-    | `List x, `List y -> Lists.compare x y
     | `Blob x, `Blob y -> Blobs.compare x y
     | `Blob x, y -> Blobs.compare (x:t) ((B.make 0 y):t)
     | y, `Blob x -> Blobs.compare ((B.make 0 y):t) (x:t)
@@ -136,7 +132,6 @@ struct
     | `Union n ->  Unions.pretty () n
     | `Array n ->  CArrays.pretty () n
     | `Blob n ->  Blobs.pretty () n
-    | `List n ->  Lists.pretty () n
     | `Bot -> text bot_name
     | `Top -> text top_name
 
@@ -148,7 +143,6 @@ struct
     | `Union n ->  Unions.short w n
     | `Array n ->  CArrays.short w n
     | `Blob n ->  Blobs.short w n
-    | `List n ->  Lists.short w n
     | `Bot -> bot_name
     | `Top -> top_name
 
@@ -159,7 +153,6 @@ struct
     | `Struct n ->  Structs.isSimple n
     | `Union n ->  Unions.isSimple n
     | `Array n ->  CArrays.isSimple n
-    | `List n ->  Lists.isSimple n
     | `Blob n ->  Blobs.isSimple n
     | _ -> true
 
@@ -172,7 +165,6 @@ struct
     | `Array n -> CArrays.toXML n
     (* let (node, attr, children) = Base.toXML n in (node, ("lifted", !liftname)::attr, children) *)
     | `Blob n -> Blobs.toXML n
-    | `List n -> Lists.toXML n
     | `Bot -> Xml.Element ("Leaf", ["text",bot_name], [])
     | `Top -> Xml.Element ("Leaf", ["text",top_name], [])
 
@@ -185,7 +177,6 @@ struct
     | (`Struct x, `Struct y) -> Structs.pretty_diff () (x,y)
     | (`Union x, `Union y) -> Unions.pretty_diff () (x,y)
     | (`Array x, `Array y) -> CArrays.pretty_diff () (x,y)
-    | (`List x, `List y) -> Lists.pretty_diff () (x,y)
     | (`Blob x, `Blob y) -> Blobs.pretty_diff () (x,y)
     | _ -> dprintf "%s: %a not same type as %a" (name ()) pretty x pretty y
 
@@ -201,7 +192,6 @@ struct
     | (`Struct x, `Struct y) -> Structs.leq x y
     | (`Union x, `Union y) -> Unions.leq x y
     | (`Array x, `Array y) -> CArrays.leq x y
-    | (`List x, `List y) -> Lists.leq x y
     | (`Blob x, `Blob y) -> Blobs.leq x y
     | `Blob x, y -> Blobs.leq (x:t) ((B.make 0 y):t)
     | y, `Blob x -> Blobs.leq ((B.make 0 y):t) (x:t)
@@ -222,7 +212,6 @@ struct
     | (`Struct x, `Struct y) -> `Struct (Structs.join x y)
     | (`Union x, `Union y) -> `Union (Unions.join x y)
     | (`Array x, `Array y) -> `Array (CArrays.join x y)
-    | (`List x, `List y) -> `List (Lists.join x y)
     | (`Blob x, `Blob y) -> `Blob (Blobs.join x y)
     | `Blob x, y
     |  y, `Blob x ->
@@ -244,7 +233,6 @@ struct
     | (`Struct x, `Struct y) -> `Struct (Structs.meet x y)
     | (`Union x, `Union y) -> `Union (Unions.meet x y)
     | (`Array x, `Array y) -> `Array (CArrays.meet x y)
-    | (`List x, `List y) -> `List (Lists.meet x y)
     | (`Blob x, `Blob y) -> `Blob (Blobs.meet x y)
     | `Blob x, y
     |  y, `Blob x ->
@@ -262,7 +250,6 @@ struct
     | (`Struct x, `Struct y) -> `Struct (Structs.widen x y)
     | (`Union x, `Union y) -> `Union (Unions.widen x y)
     | (`Array x, `Array y) -> `Array (CArrays.widen x y)
-    | (`List x, `List y) -> `List (Lists.widen x y)
     | (`Blob x, `Blob y) -> `Blob (Blobs.widen x y)
     | `Blob x, y ->
       `Blob (B.widen (x:t) ((B.make 0 y):t))
@@ -277,7 +264,6 @@ struct
     | (`Struct x, `Struct y) -> `Struct (Structs.narrow x y)
     | (`Union x, `Union y) -> `Union (Unions.narrow x y)
     | (`Array x, `Array y) -> `Array (CArrays.narrow x y)
-    | (`List x, `List y) -> `List (Lists.narrow x y)
     | (`Blob x, `Blob y) -> `Blob (Blobs.narrow x y)
     | `Blob x, y ->
       `Blob (B.narrow (x:t) ((B.make 0 y):t))
@@ -331,7 +317,6 @@ struct
       let v = invalidate_value voidType (CArrays.get n (IndexDomain.top ())) in
       `Array (CArrays.set n (IndexDomain.top ()) v)
     |                 t , `Blob n       -> `Blob (invalidate_value t n)
-    |                 _ , `List n       -> `Top
     |                 t , _             -> top_value t
 
   (* Funny, this does not compile without the final type annotation! *)
@@ -345,14 +330,6 @@ struct
       | `NoOffset -> x
       | `Field (fld, offs) when fld.fcomp.cstruct -> begin
           match x with
-          | `List ls when fld.fname = "next" || fld.fname = "prev" ->
-            `Address (Lists.entry_rand ls)
-          | `Address ad when fld.fcomp.cname = "list_head" || fld.fname = "next" || fld.fname = "prev" ->
-            (*hack for lists*)
-            begin match f ad with
-              | `List l -> `Address (Lists.entry_rand l)
-              | _ -> M.warn "Trying to read a field, but was not given a struct"; top ()
-            end
           | `Struct str ->
             let x = Structs.get str fld in
             eval_offset f x offs
@@ -448,7 +425,6 @@ struct
     | `Union n ->  Unions.printXml f n
     | `Array n ->  CArrays.printXml f n
     | `Blob n ->  Blobs.printXml f n
-    | `List n ->  Lists.printXml f n
     | `Bot -> BatPrintf.fprintf f "<value>\n<data>\nbottom\n</data>\n</value>\n"
     | `Top -> BatPrintf.fprintf f "<value>\n<data>\ntop\n</data>\n</value>\n"
 end
@@ -463,5 +439,3 @@ and CArrays: ArrayDomain.S with type idx = IndexDomain.t and type value = Compou
   ArrayDomain.TrivialWithLength (Compound) (IndexDomain)
 
 and Blobs: Lattice.S with type t = Compound.t = Blob (Compound)
-
-and Lists: ListDomain.S with type elem = AD.t = ListDomain.SimpleList (AD)

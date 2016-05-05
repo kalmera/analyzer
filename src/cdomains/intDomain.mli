@@ -157,9 +157,6 @@ module Interval : S
 module Interval32 : S
 module Enums : S
 
-module ManyInts : S
-module IntDomList : S
-module IntDomTuple : S
 
 (** {b Boolean domains} *)
 

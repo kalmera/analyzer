@@ -52,11 +52,6 @@ let option_spec_list =
     if Config.tracing then Tracing.addsystem sys
     else (prerr_endline msg; raise BailFromMain)
   in
-  let oil file =
-    set_string "ana.osek.oil" file;
-    set_auto "ana.activated" "['base','escape','OSEK','OSEK2','stack_trace_set','fmode','flag']";
-    set_auto "mainfun" "[]"
-  in
   let configure_html () =
     if (get_string "outfile" = "") then
       set_string "outfile" "result";
@@ -88,16 +83,6 @@ let option_spec_list =
   ; "--halp"               , Arg.Unit (fun _ -> print_help stdout),""
   ; "-help"                , Arg.Unit (fun _ -> print_help stdout),""
   ; "--html"               , Arg.Unit (fun _ -> configure_html ()),""
-  ; "--oil"                , Arg.String oil, ""
-  (*     ; "--tramp"              , Arg.String (set_string "ana.osek.tramp"), ""  *)
-  ; "--osekdefaults"       , Arg.Unit (fun () -> set_bool "ana.osek.defaults" false), ""
-  ; "--osektaskprefix"     , Arg.String (set_string "ana.osek.taskprefix"), ""
-  ; "--osekisrprefix"      , Arg.String (set_string "ana.osek.isrprefix"), ""
-  ; "--osektasksuffix"     , Arg.String (set_string "ana.osek.tasksuffix"), ""
-  ; "--osekisrsuffix"      , Arg.String (set_string "ana.osek.isrsuffix"), ""
-  ; "--osekcheck"          , Arg.Unit (fun () -> set_bool "ana.osek.check" true), ""
-  ; "--oseknames"          , Arg.Set_string OilUtil.osek_renames, ""
-  ; "--osekids"            , Arg.Set_string OilUtil.osek_ids, ""
   ]
 
 (** List of C files to consider. *)
@@ -116,9 +101,6 @@ let parse_arguments () =
 
 (** Initialize some globals in other modules. *)
 let handle_flags () =
-  let has_oil = get_string "ana.osek.oil" <> "" in
-  if has_oil then Osek.Spec.parse_oil ();
-
   if get_bool "dbg.debug" then Messages.warnings := true;
   if get_bool "dbg.verbose" then begin
     Printexc.record_backtrace true;
@@ -179,7 +161,6 @@ let preprocess_files () =
 
   (* fill include flags *)
   let one_include_f f x = includes := "-I " ^ f (string x) ^ " " ^ !includes in
-  if get_string "ana.osek.oil" <> "" then includes := "-include " ^ (!OilUtil.header_path ^ !OilUtil.header) ^" "^ !includes;
   (*   if get_string "ana.osek.tramp" <> "" then includes := "-include " ^ get_string "ana.osek.tramp" ^" "^ !includes; *)
   get_list "includes" |> List.iter (one_include_f identity);
   get_list "kernel_includes" |> List.iter (Filename.concat kernel_root |> one_include_f);

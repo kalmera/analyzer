@@ -61,7 +61,7 @@ let classify' fn exps =
   | x -> `Unknown x
 
 let classify fn exps =
-  if not(!osek_renames) then classify' fn exps else classify' (OilUtil.get_api_names fn) exps
+  classify' fn exps
 
 type action = [ `Write | `Read ]
 
