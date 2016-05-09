@@ -430,9 +430,52 @@ let swap_st ctx st =
   {ctx with local=st}
 
 let set_st_gl ctx st gl spawn_tr eff_tr split_tr =
-  {ctx with local=st; global=gl; spawn=spawn_tr ctx.spawn; sideg=eff_tr ctx.sideg;
+  {ctx with local=st;
+            global=gl; 
+            spawn=spawn_tr ctx.spawn;
+            sideg=eff_tr ctx.sideg;
             split=split_tr ctx.split}
 
+
+type ('v, 'd, 'g) ctx' =
+  { ask'      : Queries.t -> Queries.Result.t
+  ; local'    : 'v -> 'd
+  ; global'   : varinfo -> 'g
+  ; spawn'    : varinfo -> ('v -> 'd) -> unit
+  (* ; split'    : 'd -> exp -> bool -> unit *)
+  ; sideg'    : varinfo -> 'g -> unit
+  }
+
+module type GoodSpec =
+sig
+  
+  module V' : Printable.S
+  module D' : Lattice.S
+  module G' : Lattice.S
+
+  val init     : unit -> unit
+  val finalize : unit -> unit
+
+  val startstate' : V'.t -> D'.t
+  val otherstate' : V'.t -> D'.t
+
+
+  val sync'  : (V'.t, D'.t, G'.t) ctx' -> V'.t -> D'.t * (varinfo * G'.t) list
+  val query' : (V'.t, D'.t, G'.t) ctx' -> Queries.t -> Queries.Result.t
+
+  val assign': (V'.t, D'.t, G'.t) ctx' -> lval -> exp -> V'.t -> D'.t
+  val branch': (V'.t, D'.t, G'.t) ctx' -> exp -> bool -> V'.t -> D'.t
+  val body'  : (V'.t, D'.t, G'.t) ctx' -> fundec -> V'.t -> D'.t
+  val return': (V'.t, D'.t, G'.t) ctx' -> exp option  -> fundec -> V'.t -> D'.t
+
+
+  val special' : (V'.t, D'.t, G'.t) ctx' -> 
+      lval option -> varinfo -> exp list -> V'.t -> D'.t
+  val enter'   : (V'.t, D'.t, G'.t) ctx' -> 
+      lval option -> varinfo -> exp list -> V'.t -> (D'.t * D'.t) list
+  val combine' : (V'.t, D'.t, G'.t) ctx' -> 
+      lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t
+end
 
 module type Spec =
 sig

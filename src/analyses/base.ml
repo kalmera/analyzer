@@ -38,8 +38,44 @@ let is_private (a: Q.ask) (_,fl) (v: varinfo): bool =
   (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
 
+ let get_vd = function
+   | `Left d -> d
+   | `Right _ -> BaseDomain.VD.bot()
+
+ let get_flag = function
+   | `Left _ -> BaseDomain.Flag.bot()
+   | `Right f -> f
+
+ let is_private' (a: Q.ask) fl (v: varinfo): bool =
+   !privatization &&
+   (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
+    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
+
+module BaseArgs (* : Printable.S  *)=
+struct
+  type t = [`V of varinfo | `Flag]
+  let name() = "BaseArgs"
+  let equal (x:t) y = x = y
+  let compare (x:t) y = Pervasives.compare x y
+  let hash (x:t) = Hashtbl.hash x
+  let short x s = "bla"
+  let pretty_f f () s = dprintf "bla"
+  let pretty () s = dprintf "bla"
+  let toXML _ = undefined "toXml"
+  let toXML_f _ = undefined "toXml_f"
+  let isSimple _ = true
+  let pretty_diff _ _ = dprintf "bla"
+  let printXml _ _ = ()
+end
+
 module Main =
 struct
+  open BaseDomain
+
+  module V' = BaseArgs
+  module D' = Lattice.Either (VD) (Flag)
+  module G' = VD
+
   include Analyses.DefaultSpec
 
   exception Top
@@ -55,7 +91,17 @@ struct
 
   let name = "base"
   let startstate v = CPA.bot (), Flag.bot ()
+
+  let startstate' = function
+    | `V v  -> `Left  (VD.bot ())
+    | `Flag -> `Right (Flag.bot ())
+
   let otherstate v = CPA.bot (), Flag.start_multi v
+
+  let otherstate' = function
+    | `V v  -> `Left  (VD.bot ())
+    | `Flag -> `Right (Flag.top ())
+
   let exitstate  v = CPA.bot (), Flag.start_main v
 
   let morphstate v (cpa,fl) = cpa, Flag.start_single v
@@ -96,17 +142,49 @@ struct
     (* We fold over the local state, and collect the globals *)
     CPA.fold add_var cpa (cpa, [])
 
-  let sync' privates ctx: D.t * glob_diff =
+  let sync'' privates ctx: D.t * glob_diff =
     let cpa,fl = ctx.local in
     let privates = privates || (!GU.earlyglobs && not (Flag.is_multi fl)) in
     let cpa, diff = if !GU.earlyglobs || Flag.is_multi fl then globalize ~privates:privates ctx.ask ctx.local else (cpa,[]) in
     (cpa,fl), diff
 
-  let sync = sync' false
+  let sync = sync'' false
+
+  let globalize' a fl v ov : D'.t * glob_diff  =
+    (* For each global variable, we create the diff *)
+    let add_var (v: varinfo) =
+      if is_global a v && (not (is_private' a fl v)) then begin
+        (`Left (VD.bot ()), [v, get_vd ov])
+      end else
+        (ov, [])
+    in
+    (* We fold over the local state, and collect the globals *)
+    add_var v
+
+  let sync'  : (V'.t, D'.t, G'.t) ctx' -> V'.t -> D'.t * (varinfo * G'.t) list =
+    fun ctx -> function
+      | `Flag -> (ctx.local' `Flag, [])
+      | `V v  ->
+        let fl = get_flag (ctx.local' `Flag) in
+        let ov = ctx.local' (`V v) in
+        let privates = (!GU.earlyglobs && not (Flag.is_multi fl)) in
+          if !GU.earlyglobs || Flag.is_multi fl then
+            globalize' ctx.ask' fl v ov
+          else
+            (ov, [])
 
   let publish_all ctx =
     let ctx_mul = swap_st ctx (fst ctx.local, Flag.get_multi ()) in
-    List.iter (fun ((x,d)) -> ctx.sideg x d) (snd (sync' true ctx_mul))
+    List.iter (fun ((x,d)) -> ctx.sideg x d) (snd (sync'' true ctx_mul))
+
+
+  let may_modify_syn (lv:lval) (v:varinfo) =
+    match lv with
+    | (Var v', os) -> Basetype.Variables.equal v v'
+    | (Mem e, os) -> true
+
+  (* let may_modify_sem () (lv:lval) (v:varinfo) =  *)
+
 
   (** [get st addr] returns the value corresponding to [addr] in [st]
    *  adding proper dependencies *)
@@ -219,6 +297,43 @@ struct
     | SetDomain.Unsupported x ->
       if M.tracing then M.tracel "setosek" ~var:firstvar "set got an exception '%s'\n" x;
       M.warn "Assignment to unknown address"; (st,fl)
+
+  (** [set st addr val] returns a state where [addr] is set to [val] *)
+  let set' a ?(effect=true) (gs:glob_fun) (st: V'.t->D'.t) (lval: AD.t) (value: value) (v:varinfo): D'.t =
+    if get_bool "exp.globs_are_top" then
+      D'.top ()
+    else if isFunctionType v.vtype || (not effect && not (is_private' a (get_flag (st `Flag)) v)) then
+      st (`V v)
+    else begin
+      let old = get_vd (st (`V v)) in
+      let fl  = get_flag (st `Flag) in
+      let update_one_addr vd offs: VD.t =
+        if (!GU.earlyglobs || Flag.is_multi fl) && is_global a v then
+            let get x st =
+              match get_vd (st (`V x)) with
+              | `Bot -> gs x
+              | x -> x
+            in
+            VD.update_offset (get v st) offs vd
+        else
+          VD.update_offset (get_vd (st (`V v))) offs vd
+      in
+      let get_update_offsets x xs =
+        match Addr.to_var_offset x with
+        | [(x, offs)] when x.vid = v.vid ->
+            offs :: xs
+        | _ -> xs
+      in try
+        let os = AD.fold get_update_offsets lval [] in
+        let nst = List.fold_left update_one_addr old os in
+        if AD.cardinal lval > 1 then
+          `Left (VD.join old nst)
+        else
+          `Left nst
+      with
+      | SetDomain.Unsupported x -> `Left old
+    end
+
 
   let set_many a (gs:glob_fun) (st,fl as store: store) lval_value_list: store =
     (* Maybe this can be done with a simple fold *)
@@ -556,6 +671,185 @@ struct
       end
 
 
+  (** [get st addr] returns the value corresponding to [addr] in [st]
+   *  adding proper dependencies *)
+  let rec get' a (gs: glob_fun) (st:V'.t->D'.t) (addrs:address): value =
+    let fl = get_flag (st (`Flag)) in
+    let firstvar = if M.tracing then try (List.hd (AD.to_var_may addrs)).vname with _ -> "" else "" in
+    let get_global x = gs x in
+    (* Finding a single varinfo*offset pair *)
+    let f_addr (x, offs) =
+      (* get hold of the variable value, either from local or global state *)
+      let var = if (!GU.earlyglobs || Flag.is_multi fl) && is_global a x then
+          match get_vd (st (`V x)) with
+          | `Bot -> get_global x
+          | x -> x
+        else
+          get_vd (st (`V x))
+      in
+      VD.eval_offset (get' a gs st) var offs
+    in
+    let f x =
+      match Addr.to_var_offset x with
+      | [x] -> f_addr x                    (* norml reference *)
+      | _ when Addr.is_null x -> VD.bot () (* null pointer *)
+      | _ -> `Int (ID.top ())              (* string pointer *)
+    in
+    (* We form the collecting function by joining *)
+    let f x a = VD.join (f x) a in
+    (* Finally we join over all the addresses in the set. If any of the
+     * addresses is a topped value, joining will fail. *)
+    try AD.fold f addrs (VD.bot ()) with SetDomain.Unsupported _ -> VD.top ()
+
+
+  (* The evaluation function as mutually recursive eval_lv & eval_rv *)
+  let rec eval_rv' (a: Q.ask) (gs:glob_fun) (st: V'.t->D'.t) (exp:exp): value =
+    let rec do_offs def = function
+      | Field (fd, offs) -> begin
+          match Goblintutil.is_blessed (TComp (fd.fcomp, [])) with
+          | Some v -> do_offs (`Address (AD.singleton (Addr.from_var_offset (v,convert_offset' a gs st (Field (fd, offs)))))) offs
+          | None -> do_offs def offs
+        end
+      | Index (_, offs) -> do_offs def offs
+      | NoOffset -> def
+    in
+    (* we have a special expression that should evalueate to top ... *)
+    if exp = MyCFG.unknown_exp then VD.top () else
+      (* First we try with query functions --- these are currently more precise.
+       * Ideally we would meet both values, but we fear types might not match. (bottom) *)
+      match constFold true exp with
+      (* Integer literals *)
+      (* seems like constFold already converts CChr to CInt64 *)
+      | Const (CChr x) -> eval_rv' a gs st (Const (charConstToInt x)) (* char becomes int, see Cil doc/ISO C 6.4.4.4.10 *)
+      | Const (CInt64 (num,typ,str)) -> `Int (ID.of_int num)
+      (* String literals *)
+      | Const (CStr x) -> `Address (AD.from_string x) (* normal 8-bit strings, type: char* *)
+      | Const (CWStr xs as c) -> (* wide character strings, type: wchar_t* *)
+        let x = Pretty.sprint 80 (d_const () c) in (* escapes, see impl. of d_const in cil.ml *)
+        let x = String.sub x 2 (String.length x - 3) in (* remove surrounding quotes: L"foo" -> foo *)
+        `Address (AD.from_string x) (* `Address (AD.str_ptr ()) *)
+      (* Variables and address expressions *)
+      | Lval (Var v, ofs) -> do_offs (get' a gs st (eval_lv' a gs st (Var v, ofs))) ofs
+      | Lval (Mem e, ofs) -> do_offs (get' a gs st (eval_lv' a gs st (Mem e, ofs))) ofs
+      (* Binary operators *)
+      | BinOp (op, CastE (ta, ea), CastE (tb, eb), t) when ta = tb && (op = Eq || op = Ne) ->
+        let a1 = eval_rv' a gs st ea in
+        let a2 = eval_rv' a gs st eb in
+        evalbinop op a1 a2 (* TODO this is only sound for upcasts *)
+      | BinOp (op,arg1,arg2,typ) ->
+        let a1 = eval_rv' a gs st arg1 in
+        let a2 = eval_rv' a gs st arg2 in
+        evalbinop op a1 a2
+      (* Unary operators *)
+      | UnOp (op,arg1,typ) ->
+        let a1 = eval_rv' a gs st arg1 in
+        evalunop op a1
+      (* The &-operator: we create the address abstract element *)
+      | AddrOf lval -> `Address (eval_lv' a gs st lval)
+      (* CIL's very nice implicit conversion of an array name [a] to a pointer
+       * to its first element [&a[0]]. *)
+      | StartOf lval ->
+        let array_ofs = `Index (IdxDom.of_int 0L, `NoOffset) in
+        let array_start ad =
+          match Addr.to_var_offset ad with
+          | [x, offs] -> Addr.from_var_offset (x, add_offset offs array_ofs)
+          | _ -> ad
+        in
+        `Address (AD.map array_start (eval_lv' a gs st lval))
+      | CastE (t, Const (CStr x)) -> (* VD.top () *) eval_rv' a gs st (Const (CStr x)) (* TODO safe? *)
+      (* Most casts are currently just ignored, that's probably not a good idea! *)
+      | CastE  (t, exp) -> begin
+          match t,eval_rv' a gs st exp with
+          | TPtr (_,_), `Top -> `Address (AD.top_ptr ())
+          | TPtr _, `Int a when Some Int64.zero = ID.to_int a ->
+            `Address (AD.null_ptr ())
+          | TPtr (t,_), `Int a when t<>voidType ->
+            `Address (AD.unknown_ptr ())
+          | TInt _, `Address a when AD.equal a (AD.null_ptr ()) ->
+            `Int (ID.of_int Int64.zero)
+          (* TODO not AD.exists null... *)
+          | TInt _, `Address a ->
+            `Int (ID.top ())
+          | Cil.TInt (k,_), `Int a ->
+            let w = get_type_width k in
+            `Int (ID.cast_to_width w a)
+          (* | TPtr (_,_), `Address -> assert false (* TODO *) *)
+          | _, s -> s (* TODO care about casts... *)
+        end
+      | _ -> VD.top ()
+  (* A hackish evaluation of expressions that should immediately yield an
+   * address, e.g. when calling functions. *)
+  and eval_fv' a (gs:glob_fun) st (exp:exp): AD.t =
+    match exp with
+    | Lval lval -> eval_lv' a gs st lval
+    | _ -> eval_tv' a gs st exp
+  (* Used also for thread creation: *)
+  and eval_tv' a (gs:glob_fun) st (exp:exp): AD.t =
+    match (eval_rv' a gs st exp) with
+    | `Address x -> x
+    | _          -> M.bailwith "Problems evaluating expression to function calls!"
+  (* A function to convert the offset to our abstract representation of
+   * offsets, i.e.  evaluate the index expression to the integer domain. *)
+  and convert_offset' a (gs:glob_fun) (st:V'.t->D'.t) (ofs: offset) =
+    match ofs with
+    | NoOffset -> `NoOffset
+    | Field (fld, ofs) -> `Field (fld, convert_offset' a gs st ofs)
+    | Index (exp, ofs) ->
+      let exp_rv = eval_rv' a gs st exp in
+      match exp_rv with
+      | `Int i -> `Index (iDtoIdx i, convert_offset' a gs st ofs)
+      | `Top   -> `Index (IdxDom.top (), convert_offset' a gs st ofs)
+      | `Bot -> `Index (IdxDom.bot (), convert_offset' a gs st ofs)
+      | _ -> M.bailwith "Index not an integer value"
+  (* Evaluation of lvalues to our abstract address domain. *)
+  and eval_lv' (a: Q.ask) (gs:glob_fun) (st:V'.t->D'.t) (lval:lval): AD.t =
+    let rec do_offs def = function
+      | Field (fd, offs) -> begin
+          match Goblintutil.is_blessed (TComp (fd.fcomp, [])) with
+          | Some v -> do_offs (AD.singleton (Addr.from_var_offset (v,convert_offset' a gs st (Field (fd, offs))))) offs
+          | None -> do_offs def offs
+        end
+      | Index (_, offs) -> do_offs def offs
+      | NoOffset -> def
+    in
+    match lval with
+    | Var x, NoOffset when (not x.vglob) && Goblintutil.is_blessed x.vtype<> None ->
+      begin match Goblintutil.is_blessed x.vtype with
+        | Some v -> AD.singleton (Addr.from_var v)
+        | _ ->  AD.singleton (Addr.from_var_offset (x, convert_offset' a gs st NoOffset))
+      end
+    (* The simpler case with an explicit variable, e.g. for [x.field] we just
+     * create the address { (x,field) } *)
+    | Var x, ofs ->
+      if x.vglob
+      then AD.singleton (Addr.from_var_offset (x, convert_offset' a gs st ofs))
+      else do_offs (AD.singleton (Addr.from_var_offset (x, convert_offset' a gs st ofs))) ofs
+    (* The more complicated case when [exp = & x.field] and we are asked to
+     * evaluate [(\*exp).subfield]. We first evaluate [exp] to { (x,field) }
+     * and then add the subfield to it: { (x,field.subfield) }. *)
+    | Mem n, ofs -> begin
+        match (eval_rv' a gs st n) with
+        | `Address adr -> do_offs (AD.map (add_offset_varinfo (convert_offset' a gs st ofs)) adr) ofs
+        | `Bot -> AD.bot ()
+        | _ ->  let str = Pretty.sprint ~width:80 (Pretty.dprintf "%a " d_lval lval) in
+          M.debug ("Failed evaluating "^str^" to lvalue"); do_offs (AD.unknown_ptr ()) ofs
+      end
+
+
+
+  let may_modify_syn (lv:lval) (v:varinfo) =
+    match lv with
+    | (Var v', os) -> Basetype.Variables.equal v v'
+    | (Mem e, os) -> true
+
+  let may_modify_sem ctx (lv:lval) (v:varinfo) =
+    let a = eval_lv' ctx.ask' ctx.global' ctx.local' lv in
+    if AD.is_top a || AD.mem (Addr.unknown_ptr ()) a ||
+       AD.exists (fun i -> List.mem v (Addr.to_var_may i)) a then
+      Some a
+    else
+      None
+
 
   (**************************************************************************
    * Auxilliary functions
@@ -643,6 +937,31 @@ struct
     | TNamed ({ttype=t}, _) -> bot_value a gs st t
     | _ -> `Bot
 
+  let rec bot_value' a (gs:glob_fun) (st: V'.t->D'.t) (t: typ): value =
+    let rec bot_comp compinfo: ValueDomain.Structs.t =
+      let nstruct = ValueDomain.Structs.top () in
+      let bot_field nstruct fd = ValueDomain.Structs.replace nstruct fd (bot_value' a gs st fd.ftype) in
+      List.fold_left bot_field nstruct compinfo.cfields
+    in
+    match t with
+    | TInt _ -> `Bot (*`Int (ID.bot ()) -- should be lower than any int or address*)
+    | TPtr _ -> `Address (AD.bot ())
+    | TComp ({cstruct=true} as ci,_) -> `Struct (bot_comp ci)
+    | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.bot ())
+    | TArray (_, None, _) -> `Array (ValueDomain.CArrays.bot ())
+    | TArray (ai, Some exp, _) -> begin
+        let default = `Array (ValueDomain.CArrays.bot ()) in
+        match eval_rv' a gs st exp with
+        | `Int n -> begin
+            match ID.to_int n with
+            | Some n -> `Array (ValueDomain.CArrays.make (Int64.to_int n) (bot_value' a gs st ai))
+            | _ -> default
+          end
+        | _ -> default
+      end
+    | TNamed ({ttype=t}, _) -> bot_value' a gs st t
+    | _ -> `Bot
+
   let rec init_value a (gs:glob_fun) (st: store) (t: typ): value =
     let rec init_comp compinfo: ValueDomain.Structs.t =
       let nstruct = ValueDomain.Structs.top () in
@@ -657,6 +976,22 @@ struct
     | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.top ())
     | TArray _ -> bot_value a gs st t
     | TNamed ({ttype=t}, _) -> init_value a gs st t
+    | _ -> `Top
+
+  let rec init_value' a (gs:glob_fun) (st: V'.t->D'.t) (t: typ): VD.t =
+    let rec init_comp' compinfo: ValueDomain.Structs.t =
+      let nstruct = ValueDomain.Structs.top () in
+      let init_field' nstruct fd = ValueDomain.Structs.replace nstruct fd (init_value' a gs st fd.ftype) in
+      List.fold_left init_field' nstruct compinfo.cfields
+    in
+    match t with
+    | t when is_mutex_type t -> `Top
+    | TInt _ -> `Int (ID.top ())
+    | TPtr _ -> `Address (AD.join (AD.safe_ptr ()) (AD.null_ptr ()))
+    | TComp ({cstruct=true} as ci,_) -> `Struct (init_comp' ci)
+    | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.top ())
+    | TArray _ -> bot_value' a gs st t
+    | TNamed ({ttype=t}, _) -> init_value' a gs st t
     | _ -> `Top
 
   let rec top_value a (gs:glob_fun) (st: store) (t: typ): value =
@@ -685,7 +1020,33 @@ struct
     | TNamed ({ttype=t}, _) -> top_value a gs st t
     | _ -> `Top
 
-  let invariant a (gs:glob_fun) st exp tv =
+  let rec top_value' a (gs:glob_fun) (st: V'.t->D'.t) (t: typ): value =
+    let rec top_comp compinfo: ValueDomain.Structs.t =
+      let nstruct = ValueDomain.Structs.top () in
+      let top_field nstruct fd = ValueDomain.Structs.replace nstruct fd (top_value' a gs st fd.ftype) in
+      List.fold_left top_field nstruct compinfo.cfields
+    in
+    match t with
+    | TInt _ -> `Int (ID.top ())
+    | TPtr _ -> `Address (AD.top_ptr ())
+    | TComp ({cstruct=true} as ci,_) -> `Struct (top_comp ci)
+    | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.top ())
+    | TArray (ai, exp, _) ->
+      let default = `Array (ValueDomain.CArrays.top ()) in
+      (match exp with
+       | Some exp ->
+         (match eval_rv' a gs st exp with
+          | `Int n -> begin
+              match ID.to_int n with
+              | Some n -> `Array (ValueDomain.CArrays.make (Int64.to_int n) (bot_value' a gs st ai))
+              | _ -> default
+            end
+          | _ -> default)
+       | None -> default)
+    | TNamed ({ttype=t}, _) -> top_value' a gs st t
+    | _ -> `Top
+
+    let invariant a (gs:glob_fun) st exp tv =
     (* We use a recursive helper function so that x != 0 is false can be handled
      * as x == 0 is true etc *)
     let rec helper (op: binop) (lval: lval) (value: value) (tv: bool) =
@@ -821,13 +1182,49 @@ struct
     | `Top -> set ask gs st adr (top_value ask gs st (AD.get_type adr))
     | v -> set ask gs st adr v
 
+  let set_savetop' ask (gs:glob_fun) st adr v =
+    match v with
+    | `Top -> set' ask gs st adr (top_value' ask gs st (AD.get_type adr))
+    | v -> set' ask gs st adr v
 
   (**************************************************************************
    * Simple defs for the transfer functions
    **************************************************************************)
 
+
   (* hack for char a[] = {"foo"} or {'f','o','o', '\000'} *)
   let char_array : (lval, string) Hashtbl.t = Hashtbl.create 500
+
+  let assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
+    | `Flag -> ctx.local' `Flag
+    | `V v  -> begin
+      match may_modify_sem ctx lval v with
+        | None -> ctx.local' (`V v)
+        | Some lval_val ->
+          let rval_val = eval_rv' ctx.ask' ctx.global' ctx.local' rval in
+          let not_local xs =
+            let not_local x =
+              match Addr.to_var_may x with
+                | [x] -> is_global ctx.ask' x
+                | _ -> Addr.is_top x || Addr.is_unknown x
+            in
+            AD.is_top xs || AD.exists not_local xs
+          in
+          begin match rval_val, lval_val with
+            | `Address adrs, lval
+              when (not !GU.global_initialization) && get_bool "kernel" && not_local lval && not (AD.is_top adrs) ->
+              let find_fps e xs = Addr.to_var_must e @ xs in
+              let vars = AD.fold find_fps adrs [] in
+              let funs = List.filter (fun x -> isFunctionType x.vtype) vars in
+              let threadstate' x = function
+                | `Flag -> `Right (create_tid x)
+                | `V v  -> `Left (VD.bot ())
+              in
+              List.iter (fun x -> ctx.spawn' x (threadstate' x)) funs
+            | _ -> ()
+          end;
+          set_savetop' ctx.ask' ctx.global' ctx.local' lval_val rval_val v
+      end
 
   let assign ctx (lval:lval) (rval:exp)  =
     let char_array_hack () =
@@ -962,6 +1359,15 @@ struct
     let inits = List.map init_var f.slocals in
     set_many ctx.ask ctx.global ctx.local inits
 
+  let body' ctx f = function
+    | `Flag -> ctx.local' `Flag
+    | `V v  -> begin
+        if List.exists (fun x -> x.vid = v.vid) f.slocals then
+          `Left (init_value' ctx.ask' ctx.global' ctx.local' v.vtype)
+        else
+          ctx.local' (`V v)
+      end
+
   let return ctx exp fundec =
     let (cp,fl) = ctx.local in
     match fundec.svar.vname with
@@ -974,6 +1380,25 @@ struct
       | None -> nst
       | Some exp -> set ctx.ask ctx.global nst (return_var ()) (eval_rv_with_query ctx.ask ctx.global ctx.local exp)
 
+  let return' ctx exp fundec = function
+    | `Flag -> begin
+        let fl = get_flag (ctx.local' `Flag) in
+        match fundec.svar.vname with
+        | "__goblint_dummy_init" -> `Right (Flag.make_main fl)
+        | "StartupHook" ->
+          (* publish_all ctx; *)
+          `Right (Flag.get_multi ())
+        | _ -> `Right fl
+      end
+    | `V v when v.vid = dummyFunDec.svar.vid ->
+        `Left (eval_rv' ctx.ask' ctx.global' ctx.local' exp)
+    | `V v  -> begin
+        if List.exists (fun x -> x.vid = v.vid) (fundec.sformals @ fundec.slocals) then
+          let vd = get_vd (ctx.local' (`V v)) in
+          `Left vd
+        else
+          `Left (VD.bot ())
+      end
 
   (**************************************************************************
    * Auxiliary functions for function calls
@@ -1655,8 +2080,8 @@ struct
     in
     combine_one ctx.local after
 
-  let is_unique ctx fl = 
-    not (BaseDomain.Flag.is_bad fl) || 
+  let is_unique ctx fl =
+    not (BaseDomain.Flag.is_bad fl) ||
     match ctx.ask Queries.IsNotUnique with
     | `Bool false -> true
     | _ -> false
@@ -1675,11 +2100,13 @@ struct
       if is_unique ctx fl then
         let tid = BaseDomain.Flag.short 20 fl in
         (Access.LSSSet.singleton es, Access.LSSet.add ("thread",tid) es)
-      else 
+      else
         (Access.LSSSet.singleton es, es)
-    end else 
+    end else
       Access.LSSSet.empty (), es
 end
+
+(* module GoodMain : GoodSpec = Main *)
 
 let _ =
   MCP.register_analysis (module Main : Spec)
