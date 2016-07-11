@@ -283,7 +283,7 @@ let do_analyze merged_AST =
     in
 
     (* Analyze with the new experimental framework. *)
-    Stats.time "analysis" (do_all_phases merged_AST) funs
+    Stats.time "analysis" (do_all_phases merged_AST) stf
   end
 
 let do_html_output () =

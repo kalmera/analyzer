@@ -73,7 +73,7 @@ struct
   let combine ctx r fe f args es =
     D.lift @@ S.combine (conv ctx) r fe f args (D.unlift es)
 
-  let part_access _ _ _ _ = 
+  let part_access _ _ _ _ =
     (Access.LSSSet.singleton (Access.LSSet.empty ()), Access.LSSet.empty ())
 end
 
@@ -94,7 +94,7 @@ struct
   let start_level = ref (`Top)
   let error_level = ref (`Lifted  0L)
 
-  let init () = 
+  let init () =
     if get_bool "dbg.slice.on" then
       start_level := `Lifted (Int64.of_int (get_int "dbg.slice.n"));
     S.init ()
@@ -123,21 +123,21 @@ struct
 
   let sync ctx =
     let liftpair (x, y) = (x, snd ctx.local), y in
-    lift_fun ctx liftpair S.sync identity 
+    lift_fun ctx liftpair S.sync identity
 
   let enter' ctx r f args =
     let liftmap = List.map (fun (x,y) -> (x, snd ctx.local), (y, snd ctx.local)) in
-    lift_fun ctx liftmap S.enter ((|>) args % (|>) f % (|>) r) 
+    lift_fun ctx liftmap S.enter ((|>) args % (|>) f % (|>) r)
 
   let lift ctx d = (d, snd ctx.local)
 
-  let query' ctx q    = lift_fun ctx identity   S.query  ((|>) q)            
-  let assign ctx lv e = lift_fun ctx (lift ctx) S.assign ((|>) e % (|>) lv)  
-  let branch ctx e tv = lift_fun ctx (lift ctx) S.branch ((|>) tv % (|>) e)  
-  let body ctx f      = lift_fun ctx (lift ctx) S.body   ((|>) f)            
-  let return ctx r f  = lift_fun ctx (lift ctx) S.return ((|>) f % (|>) r)   
-  let intrpt ctx      = lift_fun ctx (lift ctx) S.intrpt identity            
-  let special ctx r f args        = lift_fun ctx (lift ctx) S.special ((|>) args % (|>) f % (|>) r)       
+  let query' ctx q    = lift_fun ctx identity   S.query  ((|>) q)
+  let assign ctx lv e = lift_fun ctx (lift ctx) S.assign ((|>) e % (|>) lv)
+  let branch ctx e tv = lift_fun ctx (lift ctx) S.branch ((|>) tv % (|>) e)
+  let body ctx f      = lift_fun ctx (lift ctx) S.body   ((|>) f)
+  let return ctx r f  = lift_fun ctx (lift ctx) S.return ((|>) f % (|>) r)
+  let intrpt ctx      = lift_fun ctx (lift ctx) S.intrpt identity
+  let special ctx r f args        = lift_fun ctx (lift ctx) S.special ((|>) args % (|>) f % (|>) r)
   let combine' ctx r fe f args es = lift_fun ctx (lift ctx) S.combine (fun p -> p r fe f args (fst es))
 
   let leq0 = function
@@ -145,22 +145,22 @@ struct
     | `Lifted x -> x <= 0L
     | `Bot -> true
 
-  let sub1 = function 
+  let sub1 = function
     | `Lifted x -> `Lifted (Int64.sub x 1L)
     | x -> x
 
-  let add1 = function 
+  let add1 = function
     | `Lifted x -> `Lifted (Int64.add x 1L)
     | x -> x
 
-  let enter ctx r f args = 
+  let enter ctx r f args =
     let (d,l) = ctx.local in
     if leq0 l then
       [ctx.local, D.bot ()]
     else
       enter' {ctx with local=(d, sub1 l)} r f args
 
-  let combine ctx r fe f args es = 
+  let combine ctx r fe f args es =
     let (d,l) = ctx.local in
     let l = add1 l in
     if leq0 l then
@@ -169,16 +169,16 @@ struct
       let d',_ = combine' ctx r fe f args es in
       (d', l)
 
-  let query ctx = function 
+  let query ctx = function
     | Queries.EvalFunvar e ->
       let (d,l) = ctx.local in
-      if leq0 l then 
+      if leq0 l then
         `LvalSet (Queries.LS.empty ())
-      else 
+      else
         query' ctx (Queries.EvalFunvar e)
     | q -> query' ctx q
 
-  let part_access _ _ _ _ = 
+  let part_access _ _ _ _ =
     (Access.LSSSet.singleton (Access.LSSet.empty ()), Access.LSSet.empty ())
 end
 
@@ -240,7 +240,7 @@ struct
   let special ctx r f args       = lift_fun ctx D.lift S.special ((|>) args % (|>) f % (|>) r)        `Bot
   let combine ctx r fe f args es = lift_fun ctx D.lift S.combine (fun p -> p r fe f args (D.unlift es)) `Bot
 
-  let part_access _ _ _ _ = 
+  let part_access _ _ _ _ =
     (Access.LSSSet.singleton (Access.LSSet.empty ()), Access.LSSet.empty ())
 end
 
@@ -263,6 +263,80 @@ struct
   let tf (u:lv) ((e:(Cil.location * MyCFG.edge) list),(v:MyCFG.node)) get set gget gset = get v
 
   let system v = List.map (tf v) (Cfg.next v)
+end
+
+
+
+module FlatFromGoodSpec (S:GoodSpec) (CS:CallString) (Cfg:CfgBackward)
+  : sig
+    include GlobConstrSys with module LVar = VarCS (CS) (S.V')
+                           and module GVar = Basetype.Variables
+                           and module D = S.D'
+                           and module G = S.G'
+    val tf : MyCFG.node * CS.t * S.V'.t ->
+      (Cil.location * MyCFG.edge) list * MyCFG.node ->
+      ((MyCFG.node * CS.t * S.V'.t) -> S.D'.t) ->
+      ((MyCFG.node * CS.t * S.V'.t) -> S.D'.t -> unit) ->
+      (Cil.varinfo -> G.t) ->
+      (Cil.varinfo -> G.t -> unit) -> S.D'.t
+  end =
+struct
+  module LVar = VarCS (CS) (S.V')
+  module GVar = Basetype.Variables
+  module D = S.D'
+  module G = S.G'
+
+  let ctx v cs get set gget gset: (S.V'.t, S.D'.t, S.G'.t) ctx' = {
+      ask'    = (fun _ -> Queries.Result.top ());
+      local'  = (fun x -> get (v, cs, x));
+      global' = (fun g -> gget g);
+      sideg'  = (fun g gv -> gset g gv);
+      spawn'  = (fun _ _ -> ())
+    }
+
+  let tf_assign ctx lv rv x get set gget gset =
+    S.assign' ctx lv rv x
+  let tf_proc ctx r g args x get set gget gset = D.top ()
+  let tf_entry ctx f x get set gget gset = 
+    S.body' ctx f x
+  let tf_ret ctx r fd x get set gget gset = 
+    S.return' ctx r fd x
+  let tf_test ctx p b x get set gget gset = D.top ()
+
+  let tf (v,cs,x) (es,u) get set gget gset =
+    let ctx = ctx u cs get set gget gset in
+    let tf_one d (l,edge) =
+      let newd =
+        begin function
+        | Assign (lv,rv) -> tf_assign ctx lv rv x
+        | Proc (r,f,ars) -> tf_proc ctx r f ars x
+        | Entry f        -> tf_entry ctx f x
+        | Ret (r,fd)     -> tf_ret ctx r fd x
+        | Test (p,b)     -> tf_test ctx p b x
+        | ASM _          -> fun _ _ _ _ -> ignore (M.warn "ASM statement ignored."); D.bot ()
+        | Skip           -> fun _ _ _ _ -> D.bot ()
+        | SelfLoop       -> fun _ _ _ _ -> D.bot ()
+        end edge get set gget gset
+      in
+      D.join d newd
+    in
+    List.fold_left tf_one (D.bot ()) es
+
+
+  let system (v,cs,x) = 
+    let prevs = Cfg.prev v in
+    if prevs = [] then 
+      let f = function
+      | `empty ->
+        fun _ _ _ _ -> S.startstate' x
+      | `call from ->
+        fun _ _ _ _ -> D.top ()
+      in 
+      List.map f (CS.dest cs)
+    else
+      List.map (tf (v,cs,x)) prevs
+      
+    
 end
 
 (** The main point of this file---generating a [GlobConstrSys] from a [Spec]. *)
@@ -1066,7 +1140,7 @@ struct
     let d = D.fold k d (D.bot ()) in
     if D.is_bot d then raise Deadcode else d
 
-  let part_access _ _ _ _ = 
+  let part_access _ _ _ _ =
     (Access.LSSSet.singleton (Access.LSSet.empty ()), Access.LSSet.empty ())
 end
 

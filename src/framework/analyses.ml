@@ -151,32 +151,21 @@ struct
   let node (n,_) = n
 end
 
-module VarCS =
-struct
-  type t = MyCFG.node * location
-
-  let hash (n,l) =
-    match n with
-    | MyCFG.Statement s -> Hashtbl.hash (l, s.sid, 0)
-    | MyCFG.Function f -> Hashtbl.hash (l, f.vid, 1)
-    | MyCFG.FunctionEntry f -> Hashtbl.hash (l, f.vid, 2)
-
-  let equal (n1,d1) (n2,d2) =
-    MyCFG.Node.equal n1 n2 && compareLoc d1 d1 = 0
-
-  let getLocation (n,d) = MyCFG.getLoc n
-
-  let pretty () (n,d) =
-    match n with
-    | MyCFG.Statement s -> dprintf "node \"%a\"" Basetype.CilStmt.pretty s
-    | MyCFG.Function f -> dprintf "call of %s" f.vname
-    | MyCFG.FunctionEntry f -> dprintf "entry state of %s" f.vname
-
-  let pretty_trace () x =
-    dprintf "%a on %a" pretty x Basetype.ProgLines.pretty (getLocation x)
+module type CallString = 
+sig
+  include Printable.S
+  val compare: t -> t -> int
+  val empty   : t
+  val cons : (MyCFG.node * MyCFG.edge * MyCFG.node) -> t -> t
+  val dest: t -> [ `empty 
+    | `call of ((MyCFG.node * MyCFG.edge * MyCFG.node) * t)] list
 end
 
-module Edge : Hashtbl.HashedType with type t = MyCFG.node * MyCFG.edge * MyCFG.node =
+module Edge 
+  : sig
+    include Hashtbl.HashedType 
+    val compare: t -> t -> int
+  end with type t = MyCFG.node * MyCFG.edge * MyCFG.node =
 struct
   type t = MyCFG.node * MyCFG.edge * MyCFG.node
   let rec list_eq eq xs ys =
@@ -203,6 +192,104 @@ struct
     | _ -> false
   let equal (f1,e1,t1) (f2,e2,t2) = MyCFG.Node.equal f1 f2 && MyCFG.Node.equal t1 t2 && eq_edge e1 e2
   let hash (f,e,t) = MyCFG.Node.hash f lxor MyCFG.Node.hash t
+
+  let compareE x y = Pervasives.compare x y
+
+  let compare (f1,e1,t1) (f2,e2,t2) =
+    let c = MyCFG.Node.compare f1 f2 in
+    if c<>0 then c else
+      let c = compareE e1 e2 in
+      if c<>0 then c else
+        MyCFG.Node.compare t1 t2
+end
+
+module ListCallString 
+  : CallString =
+struct
+  include Printable.Blank
+  type t = (MyCFG.node * MyCFG.edge * MyCFG.node) list
+  let empty = []
+  let cons x xs = x :: xs
+  let dest = function
+    | []      -> [`empty]
+    | (x::xs) -> [`call (x,xs)]
+  let rec equal (xs:t) (ys:t): bool = 
+    let eq e1 e2 =
+      Edge.equal e1 e2
+    in
+    match xs, ys with
+    | [], [] -> true
+    | (x::xs), (y::ys) -> eq x y && equal xs ys
+    | _ -> false
+  let rec hash = function
+  | [] -> 0
+  | (x::xs) ->
+    Hashtbl.hash (Edge.hash x, hash xs)
+  let compare xs ys =
+    match xs, ys with
+    | [], [] -> 0
+    | _, []  -> 1
+    | [], _  -> -1
+    | (x::xs), (y::ys) ->
+      let c = Edge.compare x y in
+      if c = 0 then compare xs ys else c
+end
+
+
+module VarCS (CS: CallString) (V:Printable.S) : VarType with type t = MyCFG.node * CS.t * V.t =
+struct
+  type t = MyCFG.node * CS.t * V.t
+
+  let hash (n,l,v) =
+    match n with
+    | MyCFG.Statement s -> Hashtbl.hash (CS.hash l ,s.sid, 0)
+    | MyCFG.Function f -> Hashtbl.hash (CS.hash l, f.vid, 1)
+    | MyCFG.FunctionEntry f -> Hashtbl.hash (CS.hash l, f.vid, 2)
+
+  let equal (n1,d1,v1) (n2,d2,v2) =
+    MyCFG.Node.equal n1 n2 && CS.equal d1 d1 && V.equal v1 v2
+
+  let getLocation (n,_,_) = MyCFG.getLoc n
+
+  let pretty () (n,d,v) =
+    match n with
+    | MyCFG.Statement s -> dprintf "node:\"%a\", var: %a" Basetype.CilStmt.pretty s V.pretty v
+    | MyCFG.Function f -> dprintf "call: %s, var: %a" f.vname V.pretty v
+    | MyCFG.FunctionEntry f -> dprintf "entry: %s, var: %a" f.vname V.pretty v
+
+  let pretty_trace () x =
+    dprintf "%a on %a" pretty x Basetype.ProgLines.pretty (getLocation x)
+
+  let var_id (n,_,_) = Var.var_id n
+
+  let line_nr (n,_,_) = (MyCFG.getLoc n).line
+  let file_name (n,_,_) = (MyCFG.getLoc n).file
+  let description (n,_,_) = sprint 80 (Var.pretty () n)
+  let context () (_,c,_) = Pretty.nil
+  let node (n,_,_) = n
+
+  let category = function
+    | (MyCFG.Statement     s,_,_) -> 1
+    | (MyCFG.Function      f,_,_) -> 2
+    | (MyCFG.FunctionEntry f,_,_) -> 3
+
+  let compare (n1,d1,v1) (n2,d2,v2) =
+    let comp =
+      match n1, n2 with
+      | MyCFG.FunctionEntry f, MyCFG.FunctionEntry g -> compare f.vid g.vid
+      | _                    , MyCFG.FunctionEntry g -> -1
+      | MyCFG.FunctionEntry g, _                     -> 1
+      | MyCFG.Statement _, MyCFG.Function _  -> -1
+      | MyCFG.Function  _, MyCFG.Statement _ -> 1
+      | MyCFG.Statement s, MyCFG.Statement l -> compare s.sid l.sid
+      | MyCFG.Function  f, MyCFG.Function g  -> compare f.vid g.vid
+    in
+    if comp<>0 then comp else
+      let comp = CS.compare d1 d2 in
+        if comp<>0 then comp else V.compare v1 v2
+
+  let printXml f (n,c,v) =
+    Var.printXml f n
 end
 
 exception Deadcode
@@ -325,65 +412,46 @@ struct
     in
     List.iter (one_w f) !Messages.warning_table
 
-  let output table gtable gtxml gtfxml (file: file) =
-    if (get_bool "dbg.verbose") then print_endline ("Filtering output for files that match : '"^ (!GU.result_filter)^"'");
-    GU.result_regexp := (Str.regexp (!GU.result_filter));
+  let output table gtable gtfxml (file: file) =
     let out = Messages.get_out result_name !GU.out in
-    match get_string "result" with
-    | "pretty" -> ignore (fprintf out "%a\n" pretty (Lazy.force table))
-    | "indented" -> begin
-        Xmldump.print_fmt out (resultXML (Lazy.force table));
-        output_char out '\n'
-      end
-    | "compact" -> begin
-        if (get_bool "dbg.verbose") then Printf.printf "Converting to xml.%!";
-        let xml = resultXML (Lazy.force table) in
-        if (get_bool "dbg.verbose") then Printf.printf "Printing the result.%!";
-        Xmldump.print out xml;
-        output_char out '\n'
-      end
-    | "html" ->
-      Htmldump.print_html out (resultXML (Lazy.force table)) file (lazy ((gtxml gtable) :: []))
-    | "fast_xml" ->
-      let module SH = BatHashtbl.Make (Basetype.RawStrings) in
-      let file2funs = SH.create 100 in
-      let funs2node = SH.create 100 in
-      iter (fun (_,n,_) _ -> SH.add funs2node (MyCFG.getFun n).svar.vname n) (Lazy.force table);
-      iterGlobals file (function
-          | GFun (fd,loc) -> SH.add file2funs loc.file fd.svar.vname
-          | _ -> ()
-        );
-      let p_node f = function
-        | MyCFG.Statement stmt  -> BatPrintf.fprintf f "%d" stmt.sid
-        | MyCFG.Function g      -> BatPrintf.fprintf f "ret%d" g.vid
-        | MyCFG.FunctionEntry g -> BatPrintf.fprintf f "fun%d" g.vid
+    let module SH = BatHashtbl.Make (Basetype.RawStrings) in
+    let file2funs = SH.create 100 in
+    let funs2node = SH.create 100 in
+    iter (fun (_,n,_) _ -> SH.add funs2node (MyCFG.getFun n).svar.vname n) (Lazy.force table);
+    iterGlobals file (function
+        | GFun (fd,loc) -> SH.add file2funs loc.file fd.svar.vname
+        | _ -> ()
+      );
+    let p_node f = function
+      | MyCFG.Statement stmt  -> BatPrintf.fprintf f "%d" stmt.sid
+      | MyCFG.Function g      -> BatPrintf.fprintf f "ret%d" g.vid
+      | MyCFG.FunctionEntry g -> BatPrintf.fprintf f "fun%d" g.vid
+    in
+    let p_nodes f xs =
+      List.iter (BatPrintf.fprintf f "<node name=\"%a\"/>\n" p_node) xs
+    in
+    let p_funs f xs =
+      let one_fun n =
+        BatPrintf.fprintf f "<function name=\"%s\">\n%a</function>\n" n p_nodes (SH.find_all funs2node n)
       in
-      let p_nodes f xs =
-        List.iter (BatPrintf.fprintf f "<node name=\"%a\"/>\n" p_node) xs
-      in
-      let p_funs f xs =
-        let one_fun n =
-          BatPrintf.fprintf f "<function name=\"%s\">\n%a</function>\n" n p_nodes (SH.find_all funs2node n)
-        in
-        List.iter one_fun xs
-      in
-      let write_file f fn =
-        Messages.xml_file_name := fn;
-        BatPrintf.printf "Writing xml to temp. file: %s\n%!" fn;
-        BatPrintf.fprintf f "<run><parameters>%a</parameters><result>\n" (BatArray.print ~first:"" ~last:"" ~sep:" " BatString.print) BatSys.argv;
-        BatEnum.iter (fun b -> BatPrintf.fprintf f "<file name=\"%s\" path=\"%s\">\n%a</file>\n" (Filename.basename b) b p_funs (SH.find_all file2funs b)) (SH.keys file2funs);
-        BatPrintf.fprintf f "%a" printXml (Lazy.force table);
-        gtfxml f gtable;
-        printXmlWarning f ();
-        BatPrintf.fprintf f "</result></run>\n";
-        BatPrintf.fprintf f "%!"
-      in
-      if get_bool "g2html" then
-        BatFile.with_temporary_out ~mode:[`create;`text;`delete_on_exit] write_file
-      else
-        let f = BatIO.output_channel out in
-        write_file f (get_string "outfile")
-    | _ -> ()
+      List.iter one_fun xs
+    in
+    let write_file f fn =
+      Messages.xml_file_name := fn;
+      BatPrintf.printf "Writing xml to temp. file: %s\n%!" fn;
+      BatPrintf.fprintf f "<run><parameters>%a</parameters><result>\n" (BatArray.print ~first:"" ~last:"" ~sep:" " BatString.print) BatSys.argv;
+      BatEnum.iter (fun b -> BatPrintf.fprintf f "<file name=\"%s\" path=\"%s\">\n%a</file>\n" (Filename.basename b) b p_funs (SH.find_all file2funs b)) (SH.keys file2funs);
+      BatPrintf.fprintf f "%a" printXml (Lazy.force table);
+      gtfxml f gtable;
+      printXmlWarning f ();
+      BatPrintf.fprintf f "</result></run>\n";
+      BatPrintf.fprintf f "%!"
+    in
+    if get_bool "g2html" then
+      BatFile.with_temporary_out ~mode:[`create;`text;`delete_on_exit] write_file
+    else
+      let f = BatIO.output_channel out in
+      write_file f (get_string "outfile")
 end
 
 module ComposeResults (R1: Printable.S) (R2: Printable.S) (C: ResultConf) =
@@ -631,6 +699,7 @@ struct
     D.printXml f d
 end
 
+
 module ResultType2 (S:Spec) =
 struct
   open S
@@ -652,6 +721,29 @@ struct
   let pretty () (_,x,_) = D.pretty () x
   let printXml f (c,d,fd) =
     BatPrintf.fprintf f "<context>\n%a</context>\n%a" C.printXml c D.printXml d
+end
+
+module GoodResultType2 (S:GoodSpec) (CS:CallString) (V:Printable.S) =
+struct
+  open S
+  include Printable.Prod3 (Printable.Prod (CS) (V)) (D') (Basetype.CilFundec)
+  let isSimple _ = false
+  let short w ((es,v),x,f:t) = Basetype.CilFundec.short 80 f
+  let toXML ((es,v),x,_ as st:t) =
+    let open Xml in
+    let flatten_single = function
+      | Element (_,_,[x]) | x ->  x in
+    let try_replace_text s = function
+      | Element (tag, attr, children) -> Element (tag, ["text", s], children)
+      | x -> x
+    in
+    let esc = Goblintutil.escape in
+    let ctx = try_replace_text "Context" (flatten_single (CS.toXML es)) in
+    let res = try_replace_text "Value" (flatten_single (D'.toXML x)) in
+    Element ("Node",["text",esc (short 80 st)],[ctx;res])
+  let pretty () (_,x,_) = D'.pretty () x
+  let printXml f ((c,v),d,fd) =
+    BatPrintf.fprintf f "<context>\n<analysis name=\"base\">\n<value>\n<map>\n<key>callstring:</key>\n%a<key>variable:</key>\n%a</map>\n</value>\n</analysis>\n</context>\n%a" CS.printXml c V.printXml v D'.printXml d
 end
 
 
