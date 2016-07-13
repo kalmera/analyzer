@@ -8,6 +8,9 @@ open Json
 open JsonParser
 open JsonLexer
 
+let return_varstore = ref dummyFunDec.svar
+let return_varinfo () = !return_varstore
+
 (** Use this instead of [exit n]. *)
 exception BailFromMain
 

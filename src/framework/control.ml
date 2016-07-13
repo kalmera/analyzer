@@ -7,6 +7,7 @@ open Pretty
 open Analyses
 open GobConfig
 open Constraints
+open Goblintutil
 
 (** Given a [Cfg], computes the solution to [MCP.Path] *)
 module AnalyzeCFG (Cfg:CfgBidir) =
@@ -47,7 +48,7 @@ struct
       in
       GHT.iter print_globals g
     in
-    
+
     let print_dead_code (xs:Result.t) =
       let dead_locations : unit Deadcode.Locmap.t = Deadcode.Locmap.create 10 in
       let module NH = Hashtbl.Make (MyCFG.Node) in
@@ -141,7 +142,7 @@ struct
       LHT.iter add_local_var h;
       res
     in
-    
+
 
     let _ = GU.global_initialization := true in
     let _ = GU.earlyglobs := false in
@@ -150,14 +151,14 @@ struct
 
     MyCFG.write_cfgs := MyCFG.dead_code_cfg file (module Cfg:CfgBidir);
 
-    let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty,`V dummyFunDec.svar)) startfuns in
+    let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty,`V (return_varinfo ()))) startfuns in
 
     let local_xml = ref (Result.create 0) in
     let global_xml = ref (GHT.create 0) in
     let lh, gh = Stats.time "solving" (Slvr.solve [] []) startvars in
     local_xml := solver2source_result lh;
     global_xml := gh;
-    
+
     let liveness = ref (fun _ -> true) in
     if (get_bool "dbg.print_dead_code") then
           liveness := print_dead_code !local_xml;
@@ -168,7 +169,7 @@ struct
     Spec.finalize ();
     if (get_bool "dbg.verbose") then print_endline "Generating output.";
       Result.output (lazy !local_xml) !global_xml make_global_fast_xml file
-    
+
 
   let analyze file fs =
     analyze file fs (module Base.Main)

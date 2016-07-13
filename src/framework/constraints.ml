@@ -6,6 +6,7 @@ open MyCFG
 open Pretty
 open Analyses
 open GobConfig
+open Goblintutil
 
 module M = Messages
 
@@ -286,22 +287,54 @@ struct
   module D = S.D'
   module G = S.G'
 
-  let ctx v cs get set gget gset: (S.V'.t, S.D'.t, S.G'.t) ctx' = {
-      ask'    = (fun _ -> Queries.Result.top ());
+  let ctx v cs get set gget gset: (S.V'.t, S.D'.t, S.G'.t) ctx' =
+    let rec ctx = {
+      ask'    = ask;
       local'  = (fun x -> get (v, cs, x));
       global' = (fun g -> gget g);
       sideg'  = (fun g gv -> gset g gv);
       spawn'  = (fun _ _ -> ())
     }
+    and ask x =
+      S.query' ctx x
+    in
+    ctx
+
+  let rec bigsqcup = function
+      | []    -> D.bot ()
+      | [x]   -> x
+      | x::xs -> D.join x (bigsqcup xs)
+
+  let tf_normal_call (u,v) cs ctx' r e (g:varinfo) args x get set gget gset  =
+    let ncs = CS.cons (u,(r,g,args),v) cs in
+    let nctx = ctx (Function g) ncs get set gget gset in
+    S.combine' ctx' r e g args nctx.local' x
+
+  let tf_special_call ctx r e g args x get set gget gset = D.top ()
 
   let tf_assign ctx lv rv x get set gget gset =
     S.assign' ctx lv rv x
-  let tf_proc ctx r g args x get set gget gset = D.top ()
-  let tf_entry ctx f x get set gget gset = 
+  let tf_proc (u,v) cs ctx lv e args x get set gget gset =
+    let functions =
+      match ctx.ask' (Queries.EvalFunvar e) with
+      | `LvalSet ls -> Queries.LS.fold (fun ((x,_)) xs -> x::xs) ls []
+      | `Bot -> []
+      | _ -> Messages.bailwith ("ProcCall: Failed to evaluate function expression "^(sprint 80 (d_exp () e)))
+    in
+    let one_function f =
+      let has_dec = try ignore (Cilfacade.getdec f); true with Not_found -> false in
+      if has_dec && not (LibraryFunctions.use_special f.vname)
+      then tf_normal_call (u,v) cs ctx lv e f args x get set gget gset
+      else tf_special_call ctx lv e f args x get set gget gset
+    in
+    let funs = List.map one_function functions in
+    bigsqcup funs
+  let tf_entry ctx f x get set gget gset =
     S.body' ctx f x
-  let tf_ret ctx r fd x get set gget gset = 
+  let tf_ret ctx r fd x get set gget gset =
     S.return' ctx r fd x
-  let tf_test ctx p b x get set gget gset = D.top ()
+  let tf_test ctx p b x get set gget gset =
+    S.branch' ctx p b x
 
   let tf (v,cs,x) (es,u) get set gget gset =
     let ctx = ctx u cs get set gget gset in
@@ -309,7 +342,7 @@ struct
       let newd =
         begin function
         | Assign (lv,rv) -> tf_assign ctx lv rv x
-        | Proc (r,f,ars) -> tf_proc ctx r f ars x
+        | Proc (r,f,ars) -> tf_proc (u,v) cs ctx r f ars x
         | Entry f        -> tf_entry ctx f x
         | Ret (r,fd)     -> tf_ret ctx r fd x
         | Test (p,b)     -> tf_test ctx p b x
@@ -323,20 +356,22 @@ struct
     List.fold_left tf_one (D.bot ()) es
 
 
-  let system (v,cs,x) = 
+  let system (v,cs,x) =
     let prevs = Cfg.prev v in
-    if prevs = [] then 
+    if prevs = [] then
       let f = function
       | `empty ->
         fun _ _ _ _ -> S.startstate' x
-      | `call from ->
-        fun _ _ _ _ -> D.top ()
-      in 
+      | `call ((u,(r,f,a),v),cs') ->
+        fun get set gget gset ->
+          let ctx = ctx u cs' get set gget gset  in
+          S.enter' ctx r f a x
+      in
       List.map f (CS.dest cs)
     else
       List.map (tf (v,cs,x)) prevs
-      
-    
+
+
 end
 
 (** The main point of this file---generating a [GlobConstrSys] from a [Spec]. *)
@@ -402,7 +437,7 @@ struct
     nval
 
   let toplevel_kernel_return r fd ctx sideg =
-    let st = if fd.svar.vname = MyCFG.dummy_func.svar.vname then ctx.local else S.return ctx r fd in
+    let st = if fd.svar.vname = (return_varinfo ()).vname then ctx.local else S.return ctx r fd in
     let spawning_return = S.return {ctx with local = st} None MyCFG.dummy_func in
     let nval, ndiff = S.sync { ctx with local = spawning_return } in
     List.iter (fun (x,y) -> sideg x y) ndiff;
@@ -411,7 +446,7 @@ struct
   let tf_ret ret fd getl sidel getg sideg d =
     let ctx, r = common_ctx d getl sidel getg sideg in
     let d =
-      if (fd.svar.vid = MyCFG.dummy_func.svar.vid ||
+      if (fd.svar.vid = (return_varinfo ()).vid ||
           List.mem fd.svar.vname (List.map Json.string (get_list "mainfun"))) &&
          (get_bool "kernel" || get_string "ana.osek.oil" <> "")
       then toplevel_kernel_return ret fd ctx sideg

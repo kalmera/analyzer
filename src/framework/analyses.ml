@@ -151,19 +151,19 @@ struct
   let node (n,_) = n
 end
 
-module type CallString = 
+module type CallString =
 sig
   include Printable.S
   val compare: t -> t -> int
   val empty   : t
-  val cons : (MyCFG.node * MyCFG.edge * MyCFG.node) -> t -> t
-  val dest: t -> [ `empty 
-    | `call of ((MyCFG.node * MyCFG.edge * MyCFG.node) * t)] list
+  val cons : (MyCFG.node * (lval option * varinfo * exp list) * MyCFG.node) -> t -> t
+  val dest: t -> [ `empty
+                 | `call of ((MyCFG.node * (lval option * varinfo * exp list) * MyCFG.node) * t)] list
 end
 
-module Edge 
+module Edge
   : sig
-    include Hashtbl.HashedType 
+    include Hashtbl.HashedType
     val compare: t -> t -> int
   end with type t = MyCFG.node * MyCFG.edge * MyCFG.node =
 struct
@@ -203,19 +203,32 @@ struct
         MyCFG.Node.compare t1 t2
 end
 
-module ListCallString 
+module ListCallString
   : CallString =
 struct
   include Printable.Blank
-  type t = (MyCFG.node * MyCFG.edge * MyCFG.node) list
+  type t = (MyCFG.node * (lval option * varinfo * exp list) * MyCFG.node) list
   let empty = []
   let cons x xs = x :: xs
   let dest = function
     | []      -> [`empty]
     | (x::xs) -> [`call (x,xs)]
-  let rec equal (xs:t) (ys:t): bool = 
-    let eq e1 e2 =
-      Edge.equal e1 e2
+  let rec equal (xs:t) (ys:t): bool =
+    let eq (l1,f1,as1) (l2,f2,as2) =
+      let eq1 = match l1,l2 with
+        | None, None -> true
+        | Some l1, Some l2 -> Util.equals (Lval l1) (Lval l2)
+        | _ -> false
+      in
+      let rec eqExpList l1 l2  = match l1,l2 with
+        | [], [] -> true
+        | e1::l1, e2::l2 -> Exp.Exp.equal e1 e2 && eqExpList l1 l2
+        | _ -> false
+      in
+      eq1 && f1.vid = f2.vid && eqExpList as1 as2
+    in
+    let eq (f1,e1,t1) (f2,e2,t2) =
+      MyCFG.Node.equal f1 f2 && eq e1 e2 && MyCFG.Node.equal t1 t2
     in
     match xs, ys with
     | [], [] -> true
@@ -224,14 +237,14 @@ struct
   let rec hash = function
   | [] -> 0
   | (x::xs) ->
-    Hashtbl.hash (Edge.hash x, hash xs)
+    Hashtbl.hash (x, hash xs)
   let compare xs ys =
     match xs, ys with
     | [], [] -> 0
     | _, []  -> 1
     | [], _  -> -1
     | (x::xs), (y::ys) ->
-      let c = Edge.compare x y in
+      let c = Pervasives.compare x y in
       if c = 0 then compare xs ys else c
 end
 
@@ -499,7 +512,7 @@ let swap_st ctx st =
 
 let set_st_gl ctx st gl spawn_tr eff_tr split_tr =
   {ctx with local=st;
-            global=gl; 
+            global=gl;
             spawn=spawn_tr ctx.spawn;
             sideg=eff_tr ctx.sideg;
             split=split_tr ctx.split}
@@ -516,7 +529,7 @@ type ('v, 'd, 'g) ctx' =
 
 module type GoodSpec =
 sig
-  
+
   module V' : Printable.S
   module D' : Lattice.S
   module G' : Lattice.S
@@ -537,11 +550,11 @@ sig
   val return': (V'.t, D'.t, G'.t) ctx' -> exp option  -> fundec -> V'.t -> D'.t
 
 
-  val special' : (V'.t, D'.t, G'.t) ctx' -> 
+  val special' : (V'.t, D'.t, G'.t) ctx' ->
       lval option -> varinfo -> exp list -> V'.t -> D'.t
-  val enter'   : (V'.t, D'.t, G'.t) ctx' -> 
-      lval option -> varinfo -> exp list -> V'.t -> (D'.t * D'.t) list
-  val combine' : (V'.t, D'.t, G'.t) ctx' -> 
+  val enter'   : (V'.t, D'.t, G'.t) ctx' ->
+      lval option -> varinfo -> exp list -> V'.t -> D'.t
+  val combine' : (V'.t, D'.t, G'.t) ctx' ->
       lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t
 end
 
@@ -592,11 +605,11 @@ sig
   val startstate: varinfo -> D.t
 
   val body: fundec -> D.t -> D.t
-  val assign : lval -> exp -> D.t -> D.t  
-  val enter : lval option -> exp -> exp list -> D.t -> D.t  
+  val assign : lval -> exp -> D.t -> D.t
+  val enter : lval option -> exp -> exp list -> D.t -> D.t
 end
 
-module UnitBackwardSpec : BackwardSpec = 
+module UnitBackwardSpec : BackwardSpec =
 struct
   module D = Lattice.Unit
   module G = Lattice.Unit
@@ -780,7 +793,7 @@ struct
   let val_of x = x
   (* Assume that context is same as local domain. *)
 
-  let part_access _ _ _ _ = 
+  let part_access _ _ _ _ =
     (Access.LSSSet.singleton (Access.LSSet.empty ()), Access.LSSet.empty ())
     (* No partitioning on accesses and not locks *)
 end

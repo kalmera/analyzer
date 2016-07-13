@@ -3,6 +3,7 @@
 open Prelude.Ana
 open Analyses
 open GobConfig
+open Goblintutil
 module A = Analyses
 module H = Hashtbl
 module Q = Queries
@@ -71,7 +72,7 @@ struct
     | `V v ->
       BatPrintf.fprintf f "<value>\n<data>%s</data>\n</value>\n" v.vname
     | `Flag ->
-      BatPrintf.fprintf f "<value>\n<data>Flag</data>\n</value>\n" 
+      BatPrintf.fprintf f "<value>\n<data>Flag</data>\n</value>\n"
 end
 
 module Main =
@@ -79,18 +80,18 @@ struct
   open BaseDomain
 
   module V' = BaseArgs
-  module D' = struct 
-    
+  module D' = struct
+
     include Lattice.Either (VD) (Flag)
-    let printXml f = function 
+    let printXml f = function
       |`Left v ->
         VD.printXml f v
       | `Right fl ->
         Flag.printXml f fl
 
-    let printXml f x = 
+    let printXml f x =
       BatPrintf.fprintf f "<path><analysis name=\"base\">\n%a</analysis></path>\n" printXml x
-      
+
   end
   module G' = VD
 
@@ -320,7 +321,7 @@ struct
   let set' a ?(effect=true) (gs:glob_fun) (st: V'.t->D'.t) (lval: AD.t) (value: value) (v:varinfo): D'.t =
     if get_bool "exp.globs_are_top" then
       D'.top ()
-    else 
+    else
       let fl  = get_flag (st `Flag) in
       if isFunctionType v.vtype || (not effect && not (is_private' a fl v)) then
         st (`V v)
@@ -343,8 +344,8 @@ struct
           | _ -> xs
         in try
           let os = AD.fold get_update_offsets lval [] in
-          if AD.cardinal lval = 1 && 
-             List.for_all (function `NoOffset -> true | _ -> false) os 
+          if AD.cardinal lval = 1 &&
+             List.for_all (function `NoOffset -> true | _ -> false) os
           then
             let old = VD.bot () in
             let ds  = List.map (update_one_addr old) os in
@@ -356,7 +357,7 @@ struct
             let nst = List.fold_left VD.join old ds in
             `Left nst
       with
-      | SetDomain.Unsupported x -> 
+      | SetDomain.Unsupported x ->
         `Left (VD.top ())
     end
 
@@ -397,8 +398,6 @@ struct
    * Initializing my variables
    **************************************************************************)
 
-  let return_varstore = ref dummyFunDec.svar
-  let return_varinfo () = !return_varstore
   let return_var () = AD.from_var (return_varinfo ())
   let return_lval (): lval = (Var (return_varinfo ()), NoOffset)
 
@@ -1420,7 +1419,7 @@ struct
           `Right (Flag.get_multi ())
         | _ -> `Right fl
       end
-    | `V v when v.vid = dummyFunDec.svar.vid -> begin
+    | `V v when v.vid = (return_varinfo ()).vid -> begin
         match exp with
         | Some e -> `Left (eval_rv' ctx.ask' ctx.global' ctx.local' e)
         | None -> `Left (VD.bot ())
@@ -1693,6 +1692,18 @@ struct
       M.warn ("Unknown call to function " ^ Pretty.sprint 100 (d_exp () fval) ^ ".");
       [dummyFunDec.svar]
 
+  let eval_funvar' ctx fval: varinfo list =
+    try
+      let fp = eval_fv' ctx.ask' ctx.global' ctx.local' fval in
+      if AD.mem (Addr.unknown_ptr ()) fp then begin
+        M.warn ("Function pointer " ^ Pretty.sprint 100 (d_exp () fval) ^ " may contain unknown functions.");
+        dummyFunDec.svar :: AD.to_var_may fp
+      end else
+        AD.to_var_may fp
+    with SetDomain.Unsupported _ ->
+      M.warn ("Unknown call to function " ^ Pretty.sprint 100 (d_exp () fval) ^ ".");
+      [dummyFunDec.svar]
+
   let reachable_top_pointers_types ctx (ps: AD.t) : Queries.TS.t =
     let module TS = Queries.TS in
     let reachable_from_address (adr: address) =
@@ -1848,7 +1859,14 @@ struct
       end
     | _ -> Q.Result.top ()
 
-  let query' ctx (q:Q.t) = Q.Result.top ()
+  let query' ctx = function
+    | Q.EvalFunvar e ->
+      begin
+        let fs = eval_funvar' ctx e in
+                 (* Messages.report ("Base: I should know it! "^string_of_int (List.length fs)); *)
+        `LvalSet (List.fold_left (fun xs v -> Q.LS.add (v,`NoOffset) xs) (Q.LS.empty ()) fs)
+      end
+    | _ -> Q.Result.top ()
 
 (**************************************************************************
    * Function calls
@@ -1879,29 +1897,21 @@ struct
         else
           `Left (VD.bot ())
       end
-    | `V v -> begin
-        `Left (VD.top ())
-      end
-        (* let idx, _ = List.findi (fun _ x -> x.vid = v.vid) fundec.sformals in
-        let e = List.at args idx in
+    | `V v ->
+      let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.local') args in
+      let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.local' in
+      let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
+      if List.exists inAD rea then
+        D'.top ()
+      else
+        ctx.local' (`V v)
 
-      end
-
-    |
-      begin
-        let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.local') args in
-        let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' st in
-        (* List of reachable variables *)
-        let new_cpa = CPA.add_list_fun reachable (fun v -> CPA.find v cpa) new_cpa in
-        new_cpa, nfl
-      end *)
 
   let enter ctx lval fn args : (D.t * D.t) list =
     [ctx.local, make_entry ctx fn args]
 
-  let enter' ctx lval fn args v : (D'.t * D'.t) list =
-    [ctx.local' v, make_entry' ctx fn args v]
-
+  let enter' ctx lval fn args v : D'.t =
+    make_entry' ctx fn args v
 
   let tasks_var = makeGlobalVar "__GOBLINT_ARINC_TASKS" voidPtrType
 
@@ -2175,7 +2185,30 @@ struct
         lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t *)
   let combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function
     | `Flag -> after `Flag
-    | `V v  -> after (`V v)
+    | `V v  ->
+      begin match lval with
+        | Some (Var v', NoOffset) when v.vid = v'.vid ->
+          after (`V (return_varinfo ()))
+        | _ ->
+          let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.local') args in
+          let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.local' in
+          let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
+          let oldv =
+            if (not v.vglob) && List.exists inAD rea then
+              ctx.local' (`V v)
+            else
+              after (`V v)
+          in
+          let oldv = get_vd oldv in
+          begin match lval with
+            | Some (Var v', os) ->
+              let offs = convert_offset' ctx.ask' ctx.global' after os in
+              let ret_val = get_vd (after (`V (dummyFunDec.svar))) in
+              `Left (VD.update_offset oldv offs ret_val)
+            | _ -> `Left oldv
+          end
+      end
+
 
   let combine ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: D.t) : D.t =
     let combine_one (loc,lf as st: D.t) ((fun_st,fun_fl) as fun_d: D.t) =
