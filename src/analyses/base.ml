@@ -90,7 +90,7 @@ struct
         Flag.printXml f fl
 
     let printXml f x =
-      BatPrintf.fprintf f "<path><analysis name=\"base\">\n%a</analysis></path>\n" printXml x
+      BatPrintf.fprintf f "%a" printXml x
 
   end
   module G' = VD

@@ -365,7 +365,7 @@ sig
   val output: t -> unit
 end
 
-module Result (Range: Printable.S) (C: ResultConf) =
+module Result (Range: SetDomain.PrintableS) (C: ResultConf) =
 struct
   include Hash.Printable (Basetype.ProgLinesFun) (Range)
   include C
@@ -467,22 +467,6 @@ struct
       write_file f (get_string "outfile")
 end
 
-module ComposeResults (R1: Printable.S) (R2: Printable.S) (C: ResultConf) =
-struct
-  module R = Printable.Either (R1) (R2)
-  module H1 = Hash.Printable (Basetype.ProgLinesFun) (R1)
-  module H2 = Hash.Printable (Basetype.ProgLinesFun) (R2)
-
-  include Result (R) (C)
-
-  let merge h1 h2 =
-    let hash = create 113 in
-    let f k v = add hash k (`Left v) in
-    let g k v = add hash k (`Right v) in
-    H1.iter f h1;
-    H2.iter g h2;
-    hash
-end
 
 
 (* Experiment to reduce the number of arguments on transfer functions and allow
@@ -756,7 +740,7 @@ struct
     Element ("Node",["text",esc (short 80 st)],[ctx;res])
   let pretty () (_,x,_) = D'.pretty () x
   let printXml f ((c,v),d,fd) =
-    BatPrintf.fprintf f "<context>\n<analysis name=\"base\">\n<value>\n<map>\n<key>callstring:</key>\n%a<key>variable:</key>\n%a</map>\n</value>\n</analysis>\n</context>\n%a" CS.printXml c V.printXml v D'.printXml d
+    BatPrintf.fprintf f "<path>\n<analysis name=\"base\">\n<value>\n<map>\n<key>callstring:</key>\n%a<key>variable:</key>\n%a<key>value</key>%a</map>\n</value>\n</analysis>\n</path>\n" CS.printXml c V.printXml v D'.printXml d
 end
 
 
