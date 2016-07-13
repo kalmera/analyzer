@@ -56,7 +56,11 @@ module BaseArgs (* : Printable.S  *)=
 struct
   type t = [`V of varinfo | `Flag]
   let name() = "BaseArgs"
-  let equal (x:t) y = x = y
+  let equal (x:t) y =
+    match x, y with
+    | `V x ,`V y -> x.vid = y.vid
+    | `Flag, `Flag -> true
+    | _ -> false
   let compare (x:t) y = Pervasives.compare x y
   let hash (x:t) = Hashtbl.hash x
   let short n = function
@@ -321,6 +325,7 @@ struct
 
   (** [set st addr val] returns a state where [addr] is set to [val] *)
   let set' a ?(effect=true) (gs:glob_fun) (st: V'.t->D'.t) (lval: AD.t) (value: value) (v:varinfo): D'.t =
+    (* ignore (Pretty.printf "set(%s) %a = %a\n" v.vname AD.pretty lval VD.pretty value); *)
     if get_bool "exp.globs_are_top" then
       D'.top ()
     else
@@ -346,17 +351,19 @@ struct
           | _ -> xs
         in try
           let os = AD.fold get_update_offsets lval [] in
-          if AD.cardinal lval = 1 &&
-             List.for_all (function `NoOffset -> true | _ -> false) os
-          then
-            let old = VD.bot () in
-            let ds  = List.map (update_one_addr old) os in
-            let nst = List.fold_left VD.join old ds in
-            `Left nst
-          else
-            let old = get_vd (st (`V v)) in
-            let ds  = List.map (update_one_addr old) os in
-            let nst = List.fold_left VD.join old ds in
+          let old =
+            if List.for_all (function `NoOffset -> true | _ -> false) os then
+              VD.bot ()
+            else
+              get_vd (st (`V v))
+          in
+          let ds  = List.map (update_one_addr old) os in
+          let nst =
+            if AD.cardinal lval = 1 then
+              List.fold_left VD.join (VD.bot ()) ds
+            else
+              List.fold_left VD.join old ds
+          in
             `Left nst
       with
       | SetDomain.Unsupported x ->

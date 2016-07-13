@@ -223,7 +223,7 @@ struct
     let eq (l1,f1,as1) (l2,f2,as2) =
       let eq1 = match l1,l2 with
         | None, None -> true
-        | Some l1, Some l2 -> Util.equals (Lval l1) (Lval l2)
+        | Some l1, Some l2 -> Exp.Exp.equal (Lval l1) (Lval l2)
         | _ -> false
       in
       let rec eqExpList l1 l2  = match l1,l2 with
@@ -240,17 +240,60 @@ struct
     | [], [] -> true
     | (x::xs), (y::ys) -> eq x y && equal xs ys
     | _ -> false
+
   let rec hash = function
   | [] -> 0
   | (x::xs) ->
-    Hashtbl.hash (x, hash xs)
-  let compare xs ys =
+    let h (l,f,ass) =
+      let eq1 = match l with
+        | None -> 100
+        | Some l1 -> Exp.Exp.hash (Lval l1)
+      in
+      let rec eqExpList l1 = match l1 with
+        | [] -> 1
+        | e1::l1 -> Hashtbl.hash (Exp.Exp.hash e1, eqExpList l1)
+      in
+      Hashtbl.hash (eq1, f.vid, eqExpList ass)
+    in
+    let h (f,e,t)  =
+      Hashtbl.hash (MyCFG.Node.hash f, h e, MyCFG.Node.hash t)
+    in
+    Hashtbl.hash (h x, hash xs)
+
+  let rec compare xs ys =
     match xs, ys with
     | [], [] -> 0
     | _, []  -> 1
     | [], _  -> -1
     | (x::xs), (y::ys) ->
-      let c = Pervasives.compare x y in
+      let eq (l1,f1,as1) (l2,f2,as2) =
+        let c = match l1,l2 with
+          | None, None -> 0
+          | None, _ -> -1
+          | _, None -> 1
+          | Some l1, Some l2 -> Exp.Exp.compare (Lval l1) (Lval l2)
+        in
+        if c <> 0 then c else
+          let c = Pervasives.compare f1.vid f2.vid in
+          if c <> 0 then c else
+            let rec eqExpList l1 l2  = match l1,l2 with
+              | [], [] -> 0
+              | [], _ -> -1
+              | _, [] -> 1
+              | e1::l1, e2::l2 ->
+                let c = Exp.Exp.compare e1 e2 in
+                if c <> 0 then c else eqExpList l1 l2
+            in
+            eqExpList as1 as2
+      in
+      let eq (f1,e1,t1) (f2,e2,t2) =
+        let c = MyCFG.Node.compare f1 f2 in
+        if c <> 0 then c else
+          let c = eq e1 e2 in
+          if c <> 0 then c else MyCFG.Node.compare t1 t2
+      in
+
+      let c = eq x y in
       if c = 0 then compare xs ys else c
 end
 
