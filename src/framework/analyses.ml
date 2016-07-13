@@ -208,6 +208,12 @@ module ListCallString
 struct
   include Printable.Blank
   type t = (MyCFG.node * (lval option * varinfo * exp list) * MyCFG.node) list
+  let rec printXml f : t -> unit = function
+    | [] -> BatPrintf.fprintf f "main"
+    | ((_,(_,g,_),_)::xs) -> BatPrintf.fprintf f "%s::%a" g.vname printXml xs
+  let printXml f xs =
+    BatPrintf.fprintf f "<value><text>\n%a</text></value>\n" printXml xs
+
   let empty = []
   let cons x xs = x :: xs
   let dest = function

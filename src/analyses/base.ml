@@ -83,11 +83,13 @@ struct
   module D' = struct
 
     include Lattice.Either (VD) (Flag)
-    let printXml f = function
-      |`Left v ->
-        VD.printXml f v
-      | `Right fl ->
-        Flag.printXml f fl
+    let printXml f x =
+      if is_bot x then BatPrintf.fprintf f "<text>Deadcode</text>\n" else
+        match x with
+        | `Left v ->
+          VD.printXml f v
+        | `Right fl ->
+          Flag.printXml f fl
 
     let printXml f x =
       BatPrintf.fprintf f "%a" printXml x
@@ -1222,7 +1224,9 @@ struct
 
   let assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
     | `Flag -> ctx.local' `Flag
-    | `V v  -> begin
+    | `V v  ->
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then D'.bot () else begin
       match may_modify_sem ctx lval v with
         | None -> ctx.local' (`V v)
         | Some lval_val ->
@@ -1377,9 +1381,18 @@ struct
         invariant ctx.ask ctx.global res e tv
       | _ -> res
 
-  let branch' ctx (exp:exp) (tv:bool) : V'.t -> D'.t = function
-    | `Flag -> ctx.local' `Flag
-    | `V v  -> ctx.local' (`V v)
+  let branch' ctx (exp:exp) (tv:bool) (v: V'.t): D'.t =
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then D'.bot () else
+      let valu = eval_rv' ctx.ask' ctx.global' ctx.local' exp in
+      match valu with
+      | `Int value when (ID.is_bool value) ->
+        let fromJust x = match x with Some x -> x | None -> assert false in
+        let v' = fromJust (ID.to_bool value) in
+        if v' == tv then ctx.local' v else D'.bot ()
+      | `Bot ->
+        D'.bot ()
+      | _ -> ctx.local' v
 
   let body ctx f =
     (* First we create a variable-initvalue pair for each varaiable *)
