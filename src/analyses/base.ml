@@ -2194,16 +2194,16 @@ struct
           let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.local' in
           let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
           let oldv =
-            if (not v.vglob) && List.exists inAD rea then
+            if (not v.vglob) && not (List.exists inAD rea) then
               ctx.local' (`V v)
             else
               after (`V v)
           in
           let oldv = get_vd oldv in
           begin match lval with
-            | Some (Var v', os) ->
+            | Some (Var v', os) when v.vid = v'.vid ->
               let offs = convert_offset' ctx.ask' ctx.global' after os in
-              let ret_val = get_vd (after (`V (dummyFunDec.svar))) in
+              let ret_val = get_vd (after (`V (return_varinfo ()))) in
               `Left (VD.update_offset oldv offs ret_val)
             | _ -> `Left oldv
           end
