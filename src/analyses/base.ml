@@ -1055,7 +1055,7 @@ struct
         | Some {init=Some i} ->
           `Left (eval_init (init_value' ask glob local x.vtype) i)
         | _ ->
-          `Left (init_value' ask glob local x.vtype)
+          D'.bot ()
       end
     | `V x ->
       `Left (VD.top ())
