@@ -306,9 +306,11 @@ struct
       | x::xs -> D.join x (bigsqcup xs)
 
   let tf_normal_call (u,v) cs ctx' r e (g:varinfo) args x get set gget gset  =
-    let ncs = CS.cons (u,(r,g,args),v) cs in
-    let nctx = ctx (Function g) ncs get set gget gset in
-    S.combine' ctx' r e g args nctx.local' x
+    try
+      let ncs = CS.cons (u,(r,g,args),v) cs in
+      let nctx = ctx (Function g) ncs get set gget gset in
+      S.combine' ctx' r e g args nctx.local' x
+    with Analyses.Deadcode -> D.bot ()
 
   let tf_special_call ctx r e g args x get set gget gset =
     S.special' ctx r g args x
@@ -344,20 +346,10 @@ struct
       let newd =
         begin function
           | Assign (lv,rv) ->
-            (* let _ = Pretty.printf "assign of %a=%a for %a for %a\n" d_lval lv d_exp rv CS.pretty cs S.V'.pretty x in
-            let printx x =
-              ignore (Pretty.printf "\tget(%a)\n" LVar.pretty_trace x)
-            in
-            let ctx' = ctx u cs (fun x -> printx x; get x) set gget gset in *)
             tf_assign ctx' lv rv x
           | Proc (r,f,ars) -> tf_proc (u,v) cs ctx' r f ars x
           | Entry f        -> tf_entry ctx' f x
           | Ret (r,fd)     ->
-            (* let _ = Pretty.printf "return of %a for %a\n" CS.pretty cs S.V'.pretty x in
-            let printx x =
-              ignore (Pretty.printf "\tget(%a)\n" LVar.pretty_trace x)
-            in
-            let ctx' = ctx u cs (fun x -> printx x; get x) set gget gset in *)
             tf_ret ctx' r fd x
           | Test (p,b)     -> tf_test ctx' p b x
           | ASM _          -> fun _ _ _ _ -> ignore (M.warn "ASM statement ignored."); D.bot ()
@@ -368,6 +360,11 @@ struct
       D.join d newd
     in
     List.fold_left tf_one (D.bot ()) es
+
+  let tf (v,cs,x) (es,u) get set gget gset =
+    try
+      tf (v,cs,x) (es,u) get set gget gset
+    with Analyses.Deadcode -> D.bot ()
 
 
   let system (v,cs,x) =
