@@ -117,7 +117,9 @@ struct
   let name = "base"
   let startstate v = CPA.bot (), Flag.bot ()
 
-
+  let startstate' = function
+    | `V v  -> `Left  (VD.bot ())
+    | `Flag -> `Right (Flag.start_main dummyFunDec.svar)
 
   let otherstate v = CPA.bot (), Flag.start_multi v
 
@@ -351,15 +353,13 @@ struct
           let os = AD.fold get_update_offsets lval [] in
           let old =
             if List.for_all (function `NoOffset -> true | _ -> false) os then
-              VD.top ()
+              VD.bot ()
             else
               get_vd (st (`V v))
           in
           let ds  = List.map (update_one_addr old) os in
           let nst =
-            if ds=[] then
-              get_vd (st (`V v))
-            else if AD.cardinal lval = 1 then
+            if AD.cardinal lval = 1 then
               List.fold_left VD.join (VD.bot ()) ds
             else
               List.fold_left VD.join old ds
@@ -870,6 +870,7 @@ struct
       end
 
 
+
   let may_modify_syn (lv:lval) (v:varinfo) =
     match lv with
     | (Var v', os) -> Basetype.Variables.equal v v'
@@ -1026,41 +1027,6 @@ struct
     | TArray _ -> bot_value' a gs st t
     | TNamed ({ttype=t}, _) -> init_value' a gs st t
     | _ -> `Top
-
-  let startstate' = function
-    | `V x when x.vglob ->
-      let f z = function
-        | GVar (v',init,_) when v'.vid = x.vid ->
-          Some init
-        | _ -> z
-      in
-      let xi = foldGlobals !Cilfacade.ugglyImperativeHack f None in
-      let ask _ = Queries.Result.top () in
-      let glob _ = VD.top () in
-      let local _ = D'.top () in
-      let rec eval_init a = function
-        | SingleInit e ->
-          eval_rv' ask glob local e
-        | CompoundInit (t, xs) ->
-          let f a (os,i) =
-            let start = init_value' ask glob local t in
-            let v = eval_init start i in
-            let offs = convert_offset' ask glob local os in
-            VD.update_offset a offs v
-          in
-          List.fold_left f a xs
-      in
-      begin
-        match xi with
-        | Some {init=Some i} ->
-          `Left (eval_init (init_value' ask glob local x.vtype) i)
-        | _ ->
-          D'.bot ()
-      end
-    | `V x ->
-      `Left (VD.top ())
-    | `Flag ->
-      `Right (Flag.start_single dummyFunDec.svar)
 
   let rec top_value a (gs:glob_fun) (st: store) (t: typ): value =
     let rec top_comp compinfo: ValueDomain.Structs.t =
@@ -1272,7 +1238,6 @@ struct
         | None -> ctx.local' (`V v)
         | Some lval_val ->
           let rval_val = eval_rv' ctx.ask' ctx.global' ctx.local' rval in
-          (* let _ = Pretty.printf "assign' %a=%a  --> %a=%a\n" d_lval lval d_exp rval AD.pretty lval_val VD.pretty rval_val in *)
           let not_local xs =
             let not_local x =
               match Addr.to_var_may x with
@@ -1465,18 +1430,26 @@ struct
       | Some exp -> set ctx.ask ctx.global nst (return_var ()) (eval_rv_with_query ctx.ask ctx.global ctx.local exp)
 
   let return' ctx exp fundec : V'.t -> D'.t = function
-    | `Flag -> ctx.local' `Flag
+    | `Flag -> begin
+        let fl = get_flag (ctx.local' `Flag) in
+        match fundec.svar.vname with
+        | "__goblint_dummy_init" -> `Right (Flag.make_main fl)
+        | "StartupHook" ->
+          (* publish_all ctx; *)
+          `Right (Flag.get_multi ())
+        | _ -> `Right fl
+      end
     | `V v when v.vid = (return_varinfo ()).vid -> begin
         match exp with
         | Some e -> `Left (eval_rv' ctx.ask' ctx.global' ctx.local' e)
         | None -> `Left (VD.bot ())
       end
     | `V v  -> begin
-        if not (List.exists (fun x -> x.vid = v.vid) (fundec.sformals @ fundec.slocals)) then
+        if List.exists (fun x -> x.vid = v.vid) (fundec.sformals @ fundec.slocals) then
           let vd = get_vd (ctx.local' (`V v)) in
           `Left vd
         else
-          `Left (VD.top ())
+          `Left (VD.bot ())
       end
 
   (**************************************************************************
@@ -1936,24 +1909,15 @@ struct
     new_cpa, nfl
 
   let make_entry' ctx ?nfl:(nfl=get_flag (ctx.local' `Flag)) fn args : V'.t -> D'.t = function
-    | `Flag ->
-      (* let _ =
-        ignore (Pretty.printf "entry' %s(" fn.vname);
-        List.iter (fun x -> ignore (Pretty.printf " %a," d_exp x) ) args;
-        Pretty.printf ")\n"
-      in *)
-      ctx.local' `Flag
+    | `Flag -> `Right nfl
     | `V v when V.is_global v -> begin
-        (* let _ = Pretty.printf "enter global (%s) %s\n" fn.vname v.vname in *)
         let fl = get_flag (ctx.local' `Flag) in
         if not (!GU.earlyglobs || Flag.is_multi fl) || is_private' ctx.ask' fl v then
-          (* let _ = Pretty.printf "entry %s %s\n" fn.vname v.vname in *)
           ctx.local' (`V v)
         else
           `Left (VD.bot ())
       end
     | `V v ->
-      (* let _ = Pretty.printf "enter local (%s) %s\n" fn.vname v.vname in *)
       let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.local') args in
       let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.local' in
       let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
@@ -2240,13 +2204,7 @@ struct
   (* val combine' : (V'.t, D'.t, G'.t) ctx' ->
         lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t *)
   let combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function
-    | `Flag ->
-      (* let _ =
-        ignore (Pretty.printf "combine' %s(" f.vname);
-        List.iter (fun x -> ignore (Pretty.printf " %a," d_exp x) ) args;
-        Pretty.printf ")\n"
-      in *)
-      after `Flag
+    | `Flag -> after `Flag
     | `V v  ->
       begin match lval with
         | Some (Var v', NoOffset) when v.vid = v'.vid ->

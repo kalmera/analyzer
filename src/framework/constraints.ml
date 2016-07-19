@@ -310,12 +310,10 @@ struct
     let nctx = ctx (Function g) ncs get set gget gset in
     S.combine' ctx' r e g args nctx.local' x
 
-  let tf_special_call ctx r e g args x get set gget gset =
-    S.special' ctx r g args x
+  let tf_special_call ctx r e g args x get set gget gset = D.top ()
 
   let tf_assign ctx lv rv x get set gget gset =
     S.assign' ctx lv rv x
-
   let tf_proc (u,v) cs ctx lv e args x get set gget gset =
     let functions =
       match ctx.ask' (Queries.EvalFunvar e) with
@@ -339,30 +337,18 @@ struct
     S.branch' ctx p b x
 
   let tf (v,cs,x) (es,u) get set gget gset =
-    let ctx' = ctx u cs get set gget gset in
+    let ctx = ctx u cs get set gget gset in
     let tf_one d (l,edge) =
       let newd =
         begin function
-          | Assign (lv,rv) ->
-            (* let _ = Pretty.printf "assign of %a=%a for %a for %a\n" d_lval lv d_exp rv CS.pretty cs S.V'.pretty x in
-            let printx x =
-              ignore (Pretty.printf "\tget(%a)\n" LVar.pretty_trace x)
-            in
-            let ctx' = ctx u cs (fun x -> printx x; get x) set gget gset in *)
-            tf_assign ctx' lv rv x
-          | Proc (r,f,ars) -> tf_proc (u,v) cs ctx' r f ars x
-          | Entry f        -> tf_entry ctx' f x
-          | Ret (r,fd)     ->
-            (* let _ = Pretty.printf "return of %a for %a\n" CS.pretty cs S.V'.pretty x in
-            let printx x =
-              ignore (Pretty.printf "\tget(%a)\n" LVar.pretty_trace x)
-            in
-            let ctx' = ctx u cs (fun x -> printx x; get x) set gget gset in *)
-            tf_ret ctx' r fd x
-          | Test (p,b)     -> tf_test ctx' p b x
-          | ASM _          -> fun _ _ _ _ -> ignore (M.warn "ASM statement ignored."); D.bot ()
-          | Skip           -> fun _ _ _ _ -> D.bot ()
-          | SelfLoop       -> fun _ _ _ _ -> D.bot ()
+        | Assign (lv,rv) -> tf_assign ctx lv rv x
+        | Proc (r,f,ars) -> tf_proc (u,v) cs ctx r f ars x
+        | Entry f        -> tf_entry ctx f x
+        | Ret (r,fd)     -> tf_ret ctx r fd x
+        | Test (p,b)     -> tf_test ctx p b x
+        | ASM _          -> fun _ _ _ _ -> ignore (M.warn "ASM statement ignored."); D.bot ()
+        | Skip           -> fun _ _ _ _ -> D.bot ()
+        | SelfLoop       -> fun _ _ _ _ -> D.bot ()
         end edge get set gget gset
       in
       D.join d newd
@@ -374,12 +360,12 @@ struct
     let prevs = Cfg.prev v in
     if prevs = [] then
       let f = function
-        | `empty ->
-          fun _ _ _ _ -> S.startstate' x
-        | `call ((u,(r,f,a),v),cs') ->
-          fun get set gget gset ->
-            let ctx = ctx u cs' get set gget gset  in
-            S.enter' ctx r f a x
+      | `empty ->
+        fun _ _ _ _ -> S.startstate' x
+      | `call ((u,(r,f,a),v),cs') ->
+        fun get set gget gset ->
+          let ctx = ctx u cs' get set gget gset  in
+          S.enter' ctx r f a x
       in
       List.map f (CS.dest cs)
     else

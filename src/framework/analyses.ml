@@ -208,32 +208,14 @@ module ListCallString
 struct
   include Printable.Blank
   type t = (MyCFG.node * (lval option * varinfo * exp list) * MyCFG.node) list
-  let rec printArgs f = function
-    | [] -> ()
-    | [x] -> BatPrintf.fprintf f "%s" (Goblintutil.escape(Exp.Exp.short 80 x))
-    | x::xs -> BatPrintf.fprintf f "%s, %a" (Goblintutil.escape(Exp.Exp.short 80 x)) printArgs xs
   let rec printXml f : t -> unit = function
     | [] -> BatPrintf.fprintf f "main"
-    | ((_,(_,g,args),_)::xs) -> BatPrintf.fprintf f "%s(%a)::%a" g.vname printArgs args printXml xs
+    | ((_,(_,g,_),_)::xs) -> BatPrintf.fprintf f "%s::%a" g.vname printXml xs
   let printXml f xs =
     BatPrintf.fprintf f "<value><text>\n%a</text></value>\n" printXml xs
 
-  let rec prettyArgs () : exp list -> Pretty.doc = function
-    | [] -> nil
-    | [x] -> Pretty.dprintf "%s" (Goblintutil.escape(Exp.Exp.short 80 x))
-    | x::xs -> Pretty.dprintf "%s, %a" (Goblintutil.escape(Exp.Exp.short 80 x)) prettyArgs xs
-  let rec pretty _: t -> Pretty.doc = function
-    | [] -> Pretty.dprintf "main"
-    | ((_,(_,g,args),_)::xs) -> Pretty.dprintf "%s(%a)::%a" g.vname prettyArgs args pretty xs
-
   let empty = []
-  let counter = ref 5
-  let cons x xs =
-    if List.length xs > !counter then begin
-      ignore (Pretty.printf "callstring of length %d: %a\n" !counter pretty (x::xs));
-      incr counter
-    end;
-    x :: xs
+  let cons x xs = x :: xs
   let dest = function
     | []      -> [`empty]
     | (x::xs) -> [`call (x,xs)]
@@ -327,7 +309,7 @@ struct
     | MyCFG.FunctionEntry f -> Hashtbl.hash (CS.hash l, f.vid, 2)
 
   let equal (n1,d1,v1) (n2,d2,v2) =
-    MyCFG.Node.equal n1 n2 && CS.equal d1 d2 && V.equal v1 v2
+    MyCFG.Node.equal n1 n2 && CS.equal d1 d1 && V.equal v1 v2
 
   let getLocation (n,_,_) = MyCFG.getLoc n
 
