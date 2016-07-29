@@ -161,9 +161,14 @@ let createCFG (file: file) =
   let cfgF = H.create 113 in
   let cfgB = H.create 113 in
   if Messages.tracing then Messages.trace "cfg" "Starting to build the cfg.\n\n";
-
+  let cur_fn  = ref "main" in
+  let locals  = Hashtbl.create 10 in
+  let nodes   = H.create 10 in
+  let globals = Hashtbl.create 10 in
   (* Utility function to add stmt edges to the cfg *)
   let addCfg t (e,f) =
+    H.replace nodes f !cur_fn;
+    H.replace nodes t !cur_fn;
     if Messages.tracing then
       Messages.trace "cfg" "Adding edge (%a) from\n\t%a\nto\n\t%a ... "
         pretty_edge_kind e
@@ -199,9 +204,17 @@ let createCFG (file: file) =
   in
   addCfg (Function dummy_func.svar) (Ret (None, dummy_func), FunctionEntry dummy_func.svar);
   (* We iterate over all globals looking for functions: *)
+  let fun_count = ref 0 in
   iterGlobals file (fun glob ->
       match glob with
+      | GVarDecl (v,_)
+      | GVar (v,_,_) ->
+        if not (isFunctionType v.vtype) then
+          Hashtbl.replace globals v.vid ()
       | GFun (fd,loc) ->
+        cur_fn := fd.svar.vname;
+        incr fun_count;
+        Hashtbl.add locals fd.svar.vname (List.length fd.sformals + List.length fd.slocals);
         if Messages.tracing then Messages.trace "cfg" "Looking at the function %s.\n" fd.svar.vname;
         (* Walk through the parameters and pre-process them a bit... *)
         do_the_params fd;
@@ -276,6 +289,10 @@ let createCFG (file: file) =
       | _ -> ()
     );
   if Messages.tracing then Messages.trace "cfg" "CFG building finished.\n\n";
+  let g = Hashtbl.fold (fun _ _ a -> a+1) globals 0 in
+  Printf.printf "Globals: %d\n" g;
+  Printf.printf "Functions: %d\n" !fun_count;
+  Printf.printf "Nodes: %d\n" (H.length nodes);
   cfgF, cfgB
 
 let print cfg  =

@@ -39,30 +39,39 @@ let is_private (a: Q.ask) (_,fl) (v: varinfo): bool =
   (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
 
- let get_vd = function
-   | `Left d -> d
-   | `Right _ -> BaseDomain.VD.bot()
+let get_vd = function
+  | `Left d -> d
+  | `Right _ -> BaseDomain.VD.bot()
 
- let get_flag = function
-   | `Left _ -> BaseDomain.Flag.bot()
-   | `Right f -> f
+let get_flag = function
+  | `Left _ -> BaseDomain.Flag.bot()
+  | `Right f -> f
 
- let is_private' (a: Q.ask) fl (v: varinfo): bool =
-   !privatization &&
-   (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
-    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
+let is_private' (a: Q.ask) fl (v: varinfo): bool =
+  !privatization &&
+  (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
+   match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
 
 module BaseArgs (* : Printable.S  *)=
 struct
   type t = [`V of varinfo | `Flag]
   let name() = "BaseArgs"
+  let flag: t = `Flag
   let equal (x:t) y =
     match x, y with
     | `V x ,`V y -> x.vid = y.vid
     | `Flag, `Flag -> true
     | _ -> false
-  let compare (x:t) y = Pervasives.compare x y
-  let hash (x:t) = Hashtbl.hash x
+  let compare (x:t) y =
+    match x, y with
+    | `V x, `V y -> Pervasives.compare x.vid y.vid
+    | `Flag, `Flag -> 0
+    | `Flag, _ -> 1
+    | _ , `Flag -> -1
+  let hash : t -> int = function
+    | `V v -> v.vid
+    | `Flag -> 1
+
   let short n = function
     | `V v -> v.vname
     | `Flag -> "flag"
@@ -74,7 +83,7 @@ struct
   let pretty_diff _ _ = dprintf "bla"
   let printXml f = function
     | `V v ->
-      BatPrintf.fprintf f "<value>\n<data>%s</data>\n</value>\n" v.vname
+      BatPrintf.fprintf f "<value>\n<data>%s(%d)</data>\n</value>\n" v.vname v.vid
     | `Flag ->
       BatPrintf.fprintf f "<value>\n<data>Flag</data>\n</value>\n"
 end
@@ -114,12 +123,10 @@ struct
   module C      = BaseDomain.Dom
   module V      = Basetype.Variables
 
-  let name = "base"
-  let startstate v = CPA.bot (), Flag.bot ()
+  let var_count (cpa,f) = CPA.fold (fun _ _ c -> c+1) cpa 1
 
-  let startstate' = function
-    | `V v  -> `Left  (VD.bot ())
-    | `Flag -> `Right (Flag.start_main dummyFunDec.svar)
+  let name = "base"
+  let startstate v = CPA.bot (), Flag.start_single v
 
   let otherstate v = CPA.bot (), Flag.start_multi v
 
@@ -193,15 +200,14 @@ struct
         let fl = get_flag (ctx.local' `Flag) in
         let ov = ctx.local' (`V v) in
         (* let privates = (!GU.earlyglobs && not (Flag.is_multi fl)) in *)
-          if !GU.earlyglobs || Flag.is_multi fl then
-            globalize' ctx.ask' fl v ov
-          else
-            (ov, [])
+        if !GU.earlyglobs || Flag.is_multi fl then
+          globalize' ctx.ask' fl v ov
+        else
+          (ov, [])
 
   let publish_all ctx =
     let ctx_mul = swap_st ctx (fst ctx.local, Flag.get_multi ()) in
     List.iter (fun ((x,d)) -> ctx.sideg x d) (snd (sync'' true ctx_mul))
-
 
   let may_modify_syn (lv:lval) (v:varinfo) =
     match lv with
@@ -323,8 +329,14 @@ struct
       if M.tracing then M.tracel "setosek" ~var:firstvar "set got an exception '%s'\n" x;
       M.warn "Assignment to unknown address"; (st,fl)
 
+  let liveGlobs = ref (dummyFunDec.svar)
+
   (** [set st addr val] returns a state where [addr] is set to [val] *)
-  let set' a ?(effect=true) (gs:glob_fun) (st: V'.t->D'.t) (lval: AD.t) (value: value) (v:varinfo): D'.t =
+  let set' a ?(effect=true) (gs:glob_fun) set_gs (st: V'.t->D'.t) (lval: AD.t) (value: value) (v:varinfo): D'.t =
+    let get_global x =
+      set_gs !liveGlobs (`Address (AD.singleton (Addr.from_var x)));
+      gs x 
+    in
     (* ignore (Pretty.printf "set(%s) %a = %a\n" v.vname AD.pretty lval VD.pretty value); *)
     if get_bool "exp.globs_are_top" then
       D'.top ()
@@ -335,40 +347,37 @@ struct
       else begin
         let update_one_addr old offs: VD.t =
           if (!GU.earlyglobs || Flag.is_multi fl) && is_global a v then
-              let get x st =
-                match get_vd (st (`V x)) with
-                | `Bot -> gs x
-                | x -> x
-              in
-              VD.update_offset (get v st) offs value
+            VD.update_offset (get_global v) offs value
           else
             VD.update_offset old offs value
         in
         let get_update_offsets x xs =
           match Addr.to_var_offset x with
           | [(x, offs)] when x.vid = v.vid ->
-              offs :: xs
+            offs :: xs
           | _ -> xs
         in try
           let os = AD.fold get_update_offsets lval [] in
           let old =
             if List.for_all (function `NoOffset -> true | _ -> false) os then
-              VD.bot ()
+              VD.top ()
             else
               get_vd (st (`V v))
           in
           let ds  = List.map (update_one_addr old) os in
           let nst =
-            if AD.cardinal lval = 1 then
+            if ds=[] then
+              get_vd (st (`V v))
+            else if AD.cardinal lval = 1 then
               List.fold_left VD.join (VD.bot ()) ds
             else
               List.fold_left VD.join old ds
           in
-            `Left nst
-      with
-      | SetDomain.Unsupported x ->
-        `Left (VD.top ())
-    end
+          `Left nst
+        with
+        | SetDomain.Unsupported x ->
+          `Left (VD.bot ())
+      end
 
 
   let set_many a (gs:glob_fun) (st,fl as store: store) lval_value_list: store =
@@ -416,6 +425,7 @@ struct
     privatization := get_bool "exp.privatization";
     precious_globs := get_list "exp.precious_globs";
     return_varstore := makeVarinfo false "RETURN" voidType;
+    liveGlobs := makeGlobalVar "#liveGlobs" voidPtrType;
     H.clear BaseDomain.heap_hash
 
   (**************************************************************************
@@ -707,21 +717,22 @@ struct
 
   (** [get st addr] returns the value corresponding to [addr] in [st]
    *  adding proper dependencies *)
-  let rec get' a (gs: glob_fun) (st:V'.t->D'.t) (addrs:address): value =
+  let rec get' a (gs: glob_fun) (set_gs:V.t -> G'.t -> unit) (st:V'.t->D'.t) (addrs:address): value =
     let fl = get_flag (st (`Flag)) in
     (* let firstvar = if M.tracing then try (List.hd (AD.to_var_may addrs)).vname with _ -> "" else "" in *)
-    let get_global x = gs x in
+    let get_global x =
+      set_gs !liveGlobs (`Address (AD.singleton (Addr.from_var x)));
+      gs x 
+    in
     (* Finding a single varinfo*offset pair *)
     let f_addr (x, offs) =
       (* get hold of the variable value, either from local or global state *)
       let var = if (!GU.earlyglobs || Flag.is_multi fl) && is_global a x then
-          match get_vd (st (`V x)) with
-          | `Bot -> get_global x
-          | x -> x
+          get_global x
         else
           get_vd (st (`V x))
       in
-      VD.eval_offset (get' a gs st) var offs
+      VD.eval_offset (get' a gs set_gs st) var offs
     in
     let f x =
       match Addr.to_var_offset x with
@@ -737,11 +748,11 @@ struct
 
 
   (* The evaluation function as mutually recursive eval_lv & eval_rv *)
-  let rec eval_rv' (a: Q.ask) (gs:glob_fun) (st: V'.t->D'.t) (exp:exp): value =
+  let rec eval_rv' (a: Q.ask) (gs:glob_fun) (set_gs:V.t -> G'.t -> unit) (st: V'.t->D'.t) (exp:exp): value =
     let rec do_offs def = function
       | Field (fd, offs) -> begin
           match Goblintutil.is_blessed (TComp (fd.fcomp, [])) with
-          | Some v -> do_offs (`Address (AD.singleton (Addr.from_var_offset (v,convert_offset' a gs st (Field (fd, offs)))))) offs
+          | Some v -> do_offs (`Address (AD.singleton (Addr.from_var_offset (v,convert_offset' a gs set_gs st (Field (fd, offs)))))) offs
           | None -> do_offs def offs
         end
       | Index (_, offs) -> do_offs def offs
@@ -754,7 +765,7 @@ struct
       match constFold true exp with
       (* Integer literals *)
       (* seems like constFold already converts CChr to CInt64 *)
-      | Const (CChr x) -> eval_rv' a gs st (Const (charConstToInt x)) (* char becomes int, see Cil doc/ISO C 6.4.4.4.10 *)
+      | Const (CChr x) -> eval_rv' a gs set_gs st (Const (charConstToInt x)) (* char becomes int, see Cil doc/ISO C 6.4.4.4.10 *)
       | Const (CInt64 (num,typ,str)) -> `Int (ID.of_int num)
       (* String literals *)
       | Const (CStr x) -> `Address (AD.from_string x) (* normal 8-bit strings, type: char* *)
@@ -763,23 +774,23 @@ struct
         let x = String.sub x 2 (String.length x - 3) in (* remove surrounding quotes: L"foo" -> foo *)
         `Address (AD.from_string x) (* `Address (AD.str_ptr ()) *)
       (* Variables and address expressions *)
-      | Lval (Var v, ofs) -> do_offs (get' a gs st (eval_lv' a gs st (Var v, ofs))) ofs
-      | Lval (Mem e, ofs) -> do_offs (get' a gs st (eval_lv' a gs st (Mem e, ofs))) ofs
+      | Lval (Var v, ofs) -> do_offs (get' a gs set_gs st (eval_lv' a gs set_gs st (Var v, ofs))) ofs
+      | Lval (Mem e, ofs) -> do_offs (get' a gs set_gs st (eval_lv' a gs set_gs st (Mem e, ofs))) ofs
       (* Binary operators *)
       | BinOp (op, CastE (ta, ea), CastE (tb, eb), t) when ta = tb && (op = Eq || op = Ne) ->
-        let a1 = eval_rv' a gs st ea in
-        let a2 = eval_rv' a gs st eb in
+        let a1 = eval_rv' a gs set_gs st ea in
+        let a2 = eval_rv' a gs set_gs st eb in
         evalbinop op a1 a2 (* TODO this is only sound for upcasts *)
       | BinOp (op,arg1,arg2,typ) ->
-        let a1 = eval_rv' a gs st arg1 in
-        let a2 = eval_rv' a gs st arg2 in
+        let a1 = eval_rv' a gs set_gs st arg1 in
+        let a2 = eval_rv' a gs set_gs st arg2 in
         evalbinop op a1 a2
       (* Unary operators *)
       | UnOp (op,arg1,typ) ->
-        let a1 = eval_rv' a gs st arg1 in
+        let a1 = eval_rv' a gs set_gs st arg1 in
         evalunop op a1
       (* The &-operator: we create the address abstract element *)
-      | AddrOf lval -> `Address (eval_lv' a gs st lval)
+      | AddrOf lval -> `Address (eval_lv' a gs set_gs st lval)
       (* CIL's very nice implicit conversion of an array name [a] to a pointer
        * to its first element [&a[0]]. *)
       | StartOf lval ->
@@ -789,11 +800,11 @@ struct
           | [x, offs] -> Addr.from_var_offset (x, add_offset offs array_ofs)
           | _ -> ad
         in
-        `Address (AD.map array_start (eval_lv' a gs st lval))
-      | CastE (t, Const (CStr x)) -> (* VD.top () *) eval_rv' a gs st (Const (CStr x)) (* TODO safe? *)
+        `Address (AD.map array_start (eval_lv' a gs set_gs st lval))
+      | CastE (t, Const (CStr x)) -> (* VD.top () *) eval_rv' a gs set_gs st (Const (CStr x)) (* TODO safe? *)
       (* Most casts are currently just ignored, that's probably not a good idea! *)
       | CastE  (t, exp) -> begin
-          match t,eval_rv' a gs st exp with
+          match t,eval_rv' a gs set_gs st exp with
           | TPtr (_,_), `Top -> `Address (AD.top_ptr ())
           | TPtr _, `Int a when Some Int64.zero = ID.to_int a ->
             `Address (AD.null_ptr ())
@@ -813,34 +824,34 @@ struct
       | _ -> VD.top ()
   (* A hackish evaluation of expressions that should immediately yield an
    * address, e.g. when calling functions. *)
-  and eval_fv' a (gs:glob_fun) st (exp:exp): AD.t =
+  and eval_fv' a (gs:glob_fun) get_gs st (exp:exp): AD.t =
     match exp with
-    | Lval lval -> eval_lv' a gs st lval
-    | _ -> eval_tv' a gs st exp
+    | Lval lval -> eval_lv' a gs get_gs st lval
+    | _ -> eval_tv' a gs get_gs st exp
   (* Used also for thread creation: *)
-  and eval_tv' a (gs:glob_fun) st (exp:exp): AD.t =
-    match (eval_rv' a gs st exp) with
+  and eval_tv' a (gs:glob_fun) get_gs st (exp:exp): AD.t =
+    match (eval_rv' a gs get_gs st exp) with
     | `Address x -> x
     | _          -> M.bailwith "Problems evaluating expression to function calls!"
   (* A function to convert the offset to our abstract representation of
    * offsets, i.e.  evaluate the index expression to the integer domain. *)
-  and convert_offset' a (gs:glob_fun) (st:V'.t->D'.t) (ofs: offset) =
+  and convert_offset' a (gs:glob_fun) (get_gs:V.t->G'.t->unit) (st:V'.t->D'.t) (ofs: offset) =
     match ofs with
     | NoOffset -> `NoOffset
-    | Field (fld, ofs) -> `Field (fld, convert_offset' a gs st ofs)
+    | Field (fld, ofs) -> `Field (fld, convert_offset' a gs get_gs st ofs)
     | Index (exp, ofs) ->
-      let exp_rv = eval_rv' a gs st exp in
+      let exp_rv = eval_rv' a gs get_gs st exp in
       match exp_rv with
-      | `Int i -> `Index (iDtoIdx i, convert_offset' a gs st ofs)
-      | `Top   -> `Index (IdxDom.top (), convert_offset' a gs st ofs)
-      | `Bot -> `Index (IdxDom.bot (), convert_offset' a gs st ofs)
+      | `Int i -> `Index (iDtoIdx i, convert_offset' a gs get_gs st ofs)
+      | `Top   -> `Index (IdxDom.top (), convert_offset' a gs get_gs st ofs)
+      | `Bot -> `Index (IdxDom.bot (), convert_offset' a gs get_gs st ofs)
       | _ -> M.bailwith "Index not an integer value"
   (* Evaluation of lvalues to our abstract address domain. *)
-  and eval_lv' (a: Q.ask) (gs:glob_fun) (st:V'.t->D'.t) (lval:lval): AD.t =
+  and eval_lv' (a: Q.ask) (gs:glob_fun) (set_gs:V.t->G'.t->unit) (st:V'.t->D'.t) (lval:lval): AD.t =
     let rec do_offs def = function
       | Field (fd, offs) -> begin
           match Goblintutil.is_blessed (TComp (fd.fcomp, [])) with
-          | Some v -> do_offs (AD.singleton (Addr.from_var_offset (v,convert_offset' a gs st (Field (fd, offs))))) offs
+          | Some v -> do_offs (AD.singleton (Addr.from_var_offset (v,convert_offset' a gs set_gs st (Field (fd, offs))))) offs
           | None -> do_offs def offs
         end
       | Index (_, offs) -> do_offs def offs
@@ -850,20 +861,20 @@ struct
     | Var x, NoOffset when (not x.vglob) && Goblintutil.is_blessed x.vtype<> None ->
       begin match Goblintutil.is_blessed x.vtype with
         | Some v -> AD.singleton (Addr.from_var v)
-        | _ ->  AD.singleton (Addr.from_var_offset (x, convert_offset' a gs st NoOffset))
+        | _ ->  AD.singleton (Addr.from_var_offset (x, convert_offset' a gs set_gs st NoOffset))
       end
     (* The simpler case with an explicit variable, e.g. for [x.field] we just
      * create the address { (x,field) } *)
     | Var x, ofs ->
       if x.vglob
-      then AD.singleton (Addr.from_var_offset (x, convert_offset' a gs st ofs))
-      else do_offs (AD.singleton (Addr.from_var_offset (x, convert_offset' a gs st ofs))) ofs
+      then AD.singleton (Addr.from_var_offset (x, convert_offset' a gs set_gs st ofs))
+      else do_offs (AD.singleton (Addr.from_var_offset (x, convert_offset' a gs set_gs st ofs))) ofs
     (* The more complicated case when [exp = & x.field] and we are asked to
      * evaluate [(\*exp).subfield]. We first evaluate [exp] to { (x,field) }
      * and then add the subfield to it: { (x,field.subfield) }. *)
     | Mem n, ofs -> begin
-        match (eval_rv' a gs st n) with
-        | `Address adr -> do_offs (AD.map (add_offset_varinfo (convert_offset' a gs st ofs)) adr) ofs
+        match (eval_rv' a gs set_gs st n) with
+        | `Address adr -> do_offs (AD.map (add_offset_varinfo (convert_offset' a gs set_gs st ofs)) adr) ofs
         | `Bot -> AD.bot ()
         | _ ->  let str = Pretty.sprint ~width:80 (Pretty.dprintf "%a " d_lval lval) in
           M.debug ("Failed evaluating "^str^" to lvalue"); do_offs (AD.unknown_ptr ()) ofs
@@ -877,7 +888,7 @@ struct
     | (Mem e, os) -> true
 
   let may_modify_sem ctx (lv:lval) (v:varinfo) =
-    let a = eval_lv' ctx.ask' ctx.global' ctx.local' lv in
+    let a = eval_lv' ctx.ask' ctx.global' ctx.sideg' ctx.local' lv in
     if AD.is_top a || AD.mem (Addr.unknown_ptr ()) a ||
        AD.exists (fun i -> List.mem v (Addr.to_var_may i)) a then
       Some a
@@ -971,10 +982,10 @@ struct
     | TNamed ({ttype=t}, _) -> bot_value a gs st t
     | _ -> `Bot
 
-  let rec bot_value' a (gs:glob_fun) (st: V'.t->D'.t) (t: typ): value =
+  let rec bot_value' a (gs:glob_fun) (set_gs:V.t->G'.t->unit) (st: V'.t->D'.t) (t: typ): value =
     let rec bot_comp compinfo: ValueDomain.Structs.t =
       let nstruct = ValueDomain.Structs.top () in
-      let bot_field nstruct fd = ValueDomain.Structs.replace nstruct fd (bot_value' a gs st fd.ftype) in
+      let bot_field nstruct fd = ValueDomain.Structs.replace nstruct fd (bot_value' a gs set_gs st fd.ftype) in
       List.fold_left bot_field nstruct compinfo.cfields
     in
     match t with
@@ -985,15 +996,15 @@ struct
     | TArray (_, None, _) -> `Array (ValueDomain.CArrays.bot ())
     | TArray (ai, Some exp, _) -> begin
         let default = `Array (ValueDomain.CArrays.bot ()) in
-        match eval_rv' a gs st exp with
+        match eval_rv' a gs set_gs st exp with
         | `Int n -> begin
             match ID.to_int n with
-            | Some n -> `Array (ValueDomain.CArrays.make (Int64.to_int n) (bot_value' a gs st ai))
+            | Some n -> `Array (ValueDomain.CArrays.make (Int64.to_int n) (bot_value' a gs set_gs st ai))
             | _ -> default
           end
         | _ -> default
       end
-    | TNamed ({ttype=t}, _) -> bot_value' a gs st t
+    | TNamed ({ttype=t}, _) -> bot_value' a gs set_gs st t
     | _ -> `Bot
 
   let rec init_value a (gs:glob_fun) (st: store) (t: typ): value =
@@ -1012,10 +1023,10 @@ struct
     | TNamed ({ttype=t}, _) -> init_value a gs st t
     | _ -> `Top
 
-  let rec init_value' a (gs:glob_fun) (st: V'.t->D'.t) (t: typ): VD.t =
+  let rec init_value' a (gs:glob_fun) (set_gs:V.t->G'.t->unit) (st: V'.t->D'.t) (t: typ): VD.t =
     let rec init_comp' compinfo: ValueDomain.Structs.t =
       let nstruct = ValueDomain.Structs.top () in
-      let init_field' nstruct fd = ValueDomain.Structs.replace nstruct fd (init_value' a gs st fd.ftype) in
+      let init_field' nstruct fd = ValueDomain.Structs.replace nstruct fd (init_value' a gs set_gs st fd.ftype) in
       List.fold_left init_field' nstruct compinfo.cfields
     in
     match t with
@@ -1024,9 +1035,45 @@ struct
     | TPtr _ -> `Address (AD.join (AD.safe_ptr ()) (AD.null_ptr ()))
     | TComp ({cstruct=true} as ci,_) -> `Struct (init_comp' ci)
     | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.top ())
-    | TArray _ -> bot_value' a gs st t
-    | TNamed ({ttype=t}, _) -> init_value' a gs st t
+    | TArray _ -> bot_value' a gs set_gs st t
+    | TNamed ({ttype=t}, _) -> init_value' a gs set_gs st t
     | _ -> `Top
+
+  let startstate' = function
+    | `V x when x.vglob ->
+      let f z = function
+        | GVar (v',init,_) when v'.vid = x.vid ->
+          Some init
+        | _ -> z
+      in
+      let xi = foldGlobals !Cilfacade.ugglyImperativeHack f None in
+      let ask _ = Queries.Result.top () in
+      let glob _ = VD.top () in
+      let set_glob _ _ = () in
+      let local _ = D'.top () in
+      let rec eval_init a = function
+        | SingleInit e ->
+          eval_rv' ask glob set_glob local e
+        | CompoundInit (t, xs) ->
+          let f a (os,i) =
+            let start = init_value' ask glob set_glob local t in
+            let v = eval_init start i in
+            let offs = convert_offset' ask glob set_glob local os in
+            VD.update_offset a offs v
+          in
+          List.fold_left f a xs
+      in
+      begin
+        match xi with
+        | Some {init=Some i} ->
+          `Left (eval_init (init_value' ask glob set_glob local x.vtype) i)
+        | _ ->
+          D'.top ()
+      end
+    | `V x ->
+      `Left (VD.top ())
+    | `Flag ->
+      `Right (Flag.start_single (List.hd !Goblintutil.startfuns).svar)
 
   let rec top_value a (gs:glob_fun) (st: store) (t: typ): value =
     let rec top_comp compinfo: ValueDomain.Structs.t =
@@ -1054,10 +1101,10 @@ struct
     | TNamed ({ttype=t}, _) -> top_value a gs st t
     | _ -> `Top
 
-  let rec top_value' a (gs:glob_fun) (st: V'.t->D'.t) (t: typ): value =
+  let rec top_value' a (gs:glob_fun) set_gs (st: V'.t->D'.t) (t: typ): value =
     let rec top_comp compinfo: ValueDomain.Structs.t =
       let nstruct = ValueDomain.Structs.top () in
-      let top_field nstruct fd = ValueDomain.Structs.replace nstruct fd (top_value' a gs st fd.ftype) in
+      let top_field nstruct fd = ValueDomain.Structs.replace nstruct fd (top_value' a gs set_gs st fd.ftype) in
       List.fold_left top_field nstruct compinfo.cfields
     in
     match t with
@@ -1069,18 +1116,18 @@ struct
       let default = `Array (ValueDomain.CArrays.top ()) in
       (match exp with
        | Some exp ->
-         (match eval_rv' a gs st exp with
+         (match eval_rv' a gs set_gs st exp with
           | `Int n -> begin
               match ID.to_int n with
-              | Some n -> `Array (ValueDomain.CArrays.make (Int64.to_int n) (bot_value' a gs st ai))
+              | Some n -> `Array (ValueDomain.CArrays.make (Int64.to_int n) (bot_value' a gs set_gs st ai))
               | _ -> default
             end
           | _ -> default)
        | None -> default)
-    | TNamed ({ttype=t}, _) -> top_value' a gs st t
+    | TNamed ({ttype=t}, _) -> top_value' a gs set_gs st t
     | _ -> `Top
 
-    let invariant a (gs:glob_fun) st exp tv =
+  let invariant a (gs:glob_fun) st exp tv =
     (* We use a recursive helper function so that x != 0 is false can be handled
      * as x == 0 is true etc *)
     let rec helper (op: binop) (lval: lval) (value: value) (tv: bool) =
@@ -1211,15 +1258,146 @@ struct
       if M.tracing then M.traceu "invariant" "Doing nothing.\n";
       st
 
+  let invariant' a (gs:glob_fun) set_gs st exp tv (z:varinfo) =
+    (* We use a recursive helper function so that x != 0 is false can be handled
+     * as x == 0 is true etc *)
+    let rec helper (op: binop) (lval: lval) (value: value) (tv: bool) =
+      match (op, lval, value, tv) with
+      (* The true-branch where x == value: *)
+      | Eq, x, value, true ->
+        if M.tracing then M.tracec "invariant" "Yes, %a equals %a\n" d_lval x VD.pretty value;
+        Some (x, value)
+      (* The false-branch for x == value: *)
+      | Eq, x, value, false -> begin
+          match value with
+          | `Int n -> begin
+              match ID.to_int n with
+              | Some n ->
+                (* When x != n, we can return a singleton exclusion set *)
+                if M.tracing then M.tracec "invariant" "Yes, %a is not %Ld\n" d_lval x n;
+                Some (x, `Int (ID.of_excl_list [n]))
+              | None -> None
+            end
+          | `Address n -> begin
+              if M.tracing then M.tracec "invariant" "Yes, %a is not %a\n" d_lval x AD.pretty n;
+              match eval_rv' a gs set_gs st (Lval x) with
+              | `Address a when AD.is_definite n ->
+                Some (x, `Address (AD.diff a n))
+              | _ -> None
+            end
+          (* | `Address a -> Some (x, value) *)
+          | _ ->
+            (* We can't say anything else, exclusion sets are finite, so not
+             * being in one means an infinite number of values *)
+            if M.tracing then M.tracec "invariant" "Failed! (not a definite value)\n";
+            None
+        end
+      | Ne, x, value, _ -> helper Eq x value (not tv)
+      | Lt, x, value, _ -> begin
+          let range_from x = if tv then ID.ending (Int64.sub x 1L) else ID.starting x in
+          let limit_from = if tv then ID.maximal else ID.minimal in
+          match value with
+          | `Int n -> begin
+              match limit_from n with
+              | Some n ->
+                if M.tracing then M.tracec "invariant" "Yes, success! %a is not %Ld\n\n" d_lval x n;
+                Some (x, `Int (range_from n))
+              | None -> None
+            end
+          | _ -> None
+        end
+      | Le, x, value, _ -> begin
+          let range_from x = if tv then ID.ending x else ID.starting (Int64.add x 1L) in
+          let limit_from = if tv then ID.maximal else ID.minimal in
+          match value with
+          | `Int n -> begin
+              match limit_from n with
+              | Some n ->
+                if M.tracing then M.tracec "invariant" "Yes, success! %a is not %Ld\n\n" d_lval x n;
+                Some (x, `Int (range_from n))
+              | None -> None
+            end
+          | _ -> None
+        end
+      | Gt, x, value, _ -> helper Le x value (not tv)
+      | Ge, x, value, _ -> helper Lt x value (not tv)
+      | _ ->
+        if M.tracing then M.trace "invariant" "Failed! (operation not supported)\n\n";
+        None
+    in
+    if M.tracing then M.traceli "invariant" "assume expression %a is %B\n" d_exp exp tv;
+    let null_val typ =
+      match typ with
+      | TPtr _ -> `Address (AD.null_ptr())
+      | _      -> `Int (ID.of_int 0L)
+    in
+    let rec derived_invariant exp tv =
+      match exp with
+      (* Since we only handle equalities the order is not important *) (* TODO make independent of ordering *)
+      | BinOp(op, Lval x, rval, typ)
+      | BinOp(op, rval, Lval x, typ) -> helper op x (eval_rv' a gs set_gs st rval) tv
+      | BinOp(op, CastE (xt,x), CastE (yt,y), typ) when Basetype.CilType.equal xt yt
+        -> derived_invariant (BinOp (op, x, y, typ)) tv
+      (* Cases like if (x) are treated like if (x != 0) *)
+      | Lval x ->
+        (* There are two correct ways of doing it: "if ((int)x != 0)" or "if (x != (typeof(x))0))"
+         * Because we try to avoid casts (and use a more precise address domain) we use the latter *)
+        helper Ne x (null_val (typeOf exp)) tv
+      | UnOp (LNot,uexp,typ) -> derived_invariant uexp (not tv)
+      | _ ->
+        if M.tracing then M.tracec "invariant" "Failed! (expression %a not understood)\n\n" d_exp exp;
+        None
+    in
+    let is_some_bot x =
+      match x with
+      | `Int n ->  ID.is_bot n
+      | `Address n ->  AD.is_bot n
+      | `Struct n ->  ValueDomain.Structs.is_bot n
+      | `Union n ->  ValueDomain.Unions.is_bot n
+      | `Array n ->  ValueDomain.CArrays.is_bot n
+      | `Blob n ->  ValueDomain.Blobs.is_bot n
+      | `Bot -> false (* HACK: bot is here due to typing conflict (we do not cast approprietly) *)
+      | `Top -> false
+    in
+    let apply_invariant oldv newv =
+      match oldv, newv with
+      (* | `Address o, `Address n when AD.mem (Addr.unknown_ptr ()) o && AD.mem (Addr.unknown_ptr ()) n -> *)
+      (*   `Address (AD.join o n) *)
+      (* | `Address o, `Address n when AD.mem (Addr.unknown_ptr ()) o -> `Address n *)
+      (* | `Address o, `Address n when AD.mem (Addr.unknown_ptr ()) n -> `Address o *)
+      | _ -> VD.meet oldv newv
+    in
+    match derived_invariant exp tv with
+    | Some (lval, value) ->
+      if M.tracing then M.tracec "invariant" "Restricting %a with %a\n" d_lval lval VD.pretty value;
+      let addr = eval_lv' a gs set_gs st lval in
+      if (AD.is_top addr) then st (`V z)
+      else
+        let oldval = get' a gs set_gs st addr in
+        let new_val = apply_invariant oldval value in
+        (* let new_val = improve_abstract_value_with_queries a (Lval lval) new_val in *)
+        if M.tracing then M.traceu "invariant" "New value is %a\n" VD.pretty new_val;
+        (* make that address meet the invariant, i.e exclusion sets will be joined *)
+        if is_some_bot new_val then (
+          if M.tracing then M.tracel "branchosek" "C The branch %B is dead!\n" tv;
+          raise Analyses.Deadcode
+        )
+        else if VD.is_bot new_val
+        then D'.bot ()
+        else set' a gs set_gs st addr new_val ~effect:false z
+    | None ->
+      if M.tracing then M.traceu "invariant" "Doing nothing.\n";
+      st (`V z)
+
   let set_savetop ask (gs:glob_fun) st adr v =
     match v with
     | `Top -> set ask gs st adr (top_value ask gs st (AD.get_type adr))
     | v -> set ask gs st adr v
 
-  let set_savetop' ask (gs:glob_fun) st adr v =
+  let set_savetop' ask (gs:glob_fun) (set_gs:V.t->G'.t->unit) st adr v =
     match v with
-    | `Top -> set' ask gs st adr (top_value' ask gs st (AD.get_type adr))
-    | v -> set' ask gs st adr v
+    | `Top -> set' ask gs set_gs st adr (top_value' ask gs set_gs st (AD.get_type adr))
+    | v -> set' ask gs set_gs st adr v
 
   (**************************************************************************
    * Simple defs for the transfer functions
@@ -1229,20 +1407,48 @@ struct
   (* hack for char a[] = {"foo"} or {'f','o','o', '\000'} *)
   let char_array : (lval, string) Hashtbl.t = Hashtbl.create 500
 
-  let assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
-    | `Flag -> ctx.local' `Flag
+  let rec assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
+    | `Flag -> 
+      let f = ctx.local' `Flag in
+      if D'.is_top f then 
+        f 
+      else begin
+        match ctx.global' !liveGlobs with
+        | `Address addrs when not (AD.is_top addrs) ->
+          let one_addr ad = 
+            let gs = Addr.to_var_may ad in
+            let one_glob g = 
+              let d = get_vd (assign' ctx lval rval (`V g)) in
+              ctx.sideg' g d
+            in
+            List.iter one_glob gs
+          in
+          AD.iter one_addr addrs;
+          f
+        | `Bot -> f
+        | _ -> 
+          M.warn "liveGlobs is top";
+          f
+      end
     | `V v  ->
       let fl = ctx.local' `Flag in
       if D'.is_bot fl then D'.bot () else begin
-      match may_modify_sem ctx lval v with
+        match may_modify_sem ctx lval v with
+        | None when is_global ctx.ask' v -> 
+          let fl = ctx.local' `Flag in
+          if D'.is_bot fl then fl 
+          else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+            `Left (ctx.global' v)
+          else 
+            ctx.local' (`V v)
         | None -> ctx.local' (`V v)
         | Some lval_val ->
-          let rval_val = eval_rv' ctx.ask' ctx.global' ctx.local' rval in
+          let rval_val = eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' rval in
           let not_local xs =
             let not_local x =
               match Addr.to_var_may x with
-                | [x] -> is_global ctx.ask' x
-                | _ -> Addr.is_top x || Addr.is_unknown x
+              | [x] -> is_global ctx.ask' x
+              | _ -> Addr.is_top x || Addr.is_unknown x
             in
             AD.is_top xs || AD.exists not_local xs
           in
@@ -1252,14 +1458,10 @@ struct
               let find_fps e xs = Addr.to_var_must e @ xs in
               let vars = AD.fold find_fps adrs [] in
               let funs = List.filter (fun x -> isFunctionType x.vtype) vars in
-              let threadstate' x = function
-                | `Flag -> `Right (create_tid x)
-                | `V v  -> `Left (VD.bot ())
-              in
-              List.iter (fun x -> ctx.spawn' x (threadstate' x)) funs
+              List.iter (fun x -> ctx.spawn' x (`Right (create_tid x))) funs
             | _ -> ()
           end;
-          set_savetop' ctx.ask' ctx.global' ctx.local' lval_val rval_val v
+          set_savetop' ctx.ask' ctx.global' ctx.sideg' ctx.local' lval_val rval_val v
       end
 
   let assign ctx (lval:lval) (rval:exp)  =
@@ -1374,32 +1576,60 @@ struct
       raise Deadcode
     (* Otherwise we try to impose an invariant: *)
     | _ ->
-      if !GU.in_verifying_stage then
-        Locmap.replace (dead_branches tv) !Tracing.next_loc false;
+      invariant ctx.ask ctx.global ctx.local exp tv
+  (*  if !GU.in_verifying_stage then
+      Locmap.replace (dead_branches tv) !Tracing.next_loc false;
       let res = invariant ctx.ask ctx.global ctx.local exp tv in
       if M.tracing then M.tracec "branch" "EqualSet result for expression %a is %a\n" d_exp exp Queries.Result.pretty (ctx.ask (Queries.EqualSet exp));
       if M.tracing then M.tracec "branch" "CondVars result for expression %a is %a\n" d_exp exp Queries.Result.pretty (ctx.ask (Queries.CondVars exp));
       if M.tracing then M.traceu "branch" "Invariant enforced!\n";
       match ctx.ask (Queries.CondVars exp) with
       | `ExprSet s when Queries.ES.cardinal s = 1 ->
-        let e = Queries.ES.choose s in
-        let sprint f x = Pretty.sprint 80 (f () x) in
-        M.debug_each @@ "CondVars result for expression " ^ sprint d_exp exp ^ " is " ^ sprint d_exp e;
-        invariant ctx.ask ctx.global res e tv
-      | _ -> res
+      let e = Queries.ES.choose s in
+      let sprint f x = Pretty.sprint 80 (f () x) in
+      M.debug_each @@ "CondVars result for expression " ^ sprint d_exp exp ^ " is " ^ sprint d_exp e;
+      invariant ctx.ask ctx.global res e tv
+      | _ -> res*)
 
-  let branch' ctx (exp:exp) (tv:bool) (v: V'.t): D'.t =
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then D'.bot () else
-      let valu = eval_rv' ctx.ask' ctx.global' ctx.local' exp in
+  let rec branch' ctx (exp:exp) (tv:bool) (v:V'.t): D'.t =
+    let fl = ctx.local' `Flag in
+    begin match ctx.global' !liveGlobs with
+      | `Address addrs when not (AD.is_top addrs) ->
+        let one_addr ad = 
+          let gs = Addr.to_var_may ad in
+          let one_glob g = 
+            let d = get_vd (branch' ctx exp tv (`V g)) in
+            ctx.sideg' g d
+          in
+          List.iter one_glob gs
+        in
+        AD.iter one_addr addrs
+      | `Bot -> ()
+      | _ -> 
+        M.warn "liveGlobs is top"
+    end;
+    if D'.is_bot fl then D'.bot () else
+      let valu = eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp in
       match valu with
       | `Int value when (ID.is_bool value) ->
         let fromJust x = match x with Some x -> x | None -> assert false in
         let v' = fromJust (ID.to_bool value) in
-        if v' == tv then ctx.local' v else D'.bot ()
+        if v' <> tv then D'.bot () else
+        if v=`Flag then fl else ctx.local' v
       | `Bot ->
         D'.bot ()
-      | _ -> ctx.local' v
+      | _ ->
+        begin match v with
+          | `V v when is_global ctx.ask' v -> 
+            let fl = ctx.local' `Flag in
+            if D'.is_bot fl then fl 
+            else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+              `Left (ctx.global' v)
+            else 
+              invariant' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp tv v
+          | `V v -> invariant' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp tv v
+          | `Flag -> fl
+        end
 
   let body ctx f =
     (* First we create a variable-initvalue pair for each varaiable *)
@@ -1408,11 +1638,36 @@ struct
     let inits = List.map init_var f.slocals in
     set_many ctx.ask ctx.global ctx.local inits
 
-  let body' ctx f = function
-    | `Flag -> ctx.local' `Flag
+  let rec body' ctx (f:fundec): V'.t -> D'.t = function
+    | `Flag -> 
+      let fl = ctx.local' `Flag in
+      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        begin match ctx.global' !liveGlobs with
+          | `Address addrs when not (AD.is_top addrs) ->
+            let one_addr ad = 
+              let gs = Addr.to_var_may ad in
+              let one_glob g = 
+                let d = get_vd (body' ctx f (`V g)) in
+                ctx.sideg' g d
+              in
+              List.iter one_glob gs
+            in
+            AD.iter one_addr addrs
+          | `Bot -> ()
+          | _ -> 
+            M.warn "liveGlobs is top"
+        end;
+      fl
+    | `V v when is_global ctx.ask' v -> 
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then fl 
+      else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+        `Left (ctx.global' v)
+      else 
+        ctx.local' (`V v)
     | `V v  -> begin
         if List.exists (fun x -> x.vid = v.vid) f.slocals then
-          `Left (init_value' ctx.ask' ctx.global' ctx.local' v.vtype)
+          `Left (init_value' ctx.ask' ctx.global' ctx.sideg' ctx.local' v.vtype)
         else
           ctx.local' (`V v)
       end
@@ -1429,25 +1684,41 @@ struct
       | None -> nst
       | Some exp -> set ctx.ask ctx.global nst (return_var ()) (eval_rv_with_query ctx.ask ctx.global ctx.local exp)
 
-  let return' ctx exp fundec : V'.t -> D'.t = function
-    | `Flag -> begin
-        let fl = get_flag (ctx.local' `Flag) in
-        match fundec.svar.vname with
-        | "__goblint_dummy_init" -> `Right (Flag.make_main fl)
-        | "StartupHook" ->
-          (* publish_all ctx; *)
-          `Right (Flag.get_multi ())
-        | _ -> `Right fl
-      end
+  let rec return' ctx exp fundec : V'.t -> D'.t = function
+    | `Flag -> 
+      let fl = ctx.local' `Flag in
+      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        begin match ctx.global' !liveGlobs with
+          | `Address addrs when not (AD.is_top addrs) ->
+            let one_addr ad = 
+              let gs = Addr.to_var_may ad in
+              let one_glob g = 
+                let d = get_vd (return' ctx exp fundec (`V g)) in
+                ctx.sideg' g d
+              in
+              List.iter one_glob gs
+            in
+            AD.iter one_addr addrs
+          | `Bot -> ()
+          | _ -> 
+            M.warn "liveGlobs is top"
+        end;
+      fl
+    | `V v when is_global ctx.ask' v -> 
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then fl 
+      else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+        `Left (ctx.global' v)
+      else 
+        ctx.local' (`V v)
     | `V v when v.vid = (return_varinfo ()).vid -> begin
         match exp with
-        | Some e -> `Left (eval_rv' ctx.ask' ctx.global' ctx.local' e)
-        | None -> `Left (VD.bot ())
+        | Some e -> `Left (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' e)
+        | None -> `Left (VD.top ())
       end
     | `V v  -> begin
-        if List.exists (fun x -> x.vid = v.vid) (fundec.sformals @ fundec.slocals) then
-          let vd = get_vd (ctx.local' (`V v)) in
-          `Left vd
+        if not (List.exists (fun x -> x.vid = v.vid) (fundec.sformals @ fundec.slocals)) then
+          ctx.local' (`V v)
         else
           `Left (VD.bot ())
       end
@@ -1510,7 +1781,7 @@ struct
     if M.tracing then M.traceu "reachability" "Reachable addresses: %a\n" AD.pretty res;
     res
 
-  let reachable_from_address' (ask: Q.ask) (gs:glob_fun) st (adr: address): address =
+  let reachable_from_address' (ask: Q.ask) (gs:glob_fun) get_gs st (adr: address): address =
     let rec reachable_from_value' (value: value) =
       match value with
       | `Top ->
@@ -1532,7 +1803,7 @@ struct
       | `Struct s -> ValueDomain.Structs.fold (fun k v acc -> AD.join (reachable_from_value' v) acc) s empty
       | `Int _ -> empty
     in
-    reachable_from_value' (get' ask gs st adr)
+    reachable_from_value' (get' ask gs get_gs st adr)
 
   (* The code for getting the variables reachable from the list of parameters.
    * This section is very confusing, because I use the same construct, a set of
@@ -1559,7 +1830,7 @@ struct
     if M.tracing then M.traceu "reachability" "All reachable vars: %a\n" AD.pretty !visited;
     List.map AD.singleton (AD.elements !visited)
 
-  let reachable_vars' (ask: Q.ask) (args: address list) (gs:glob_fun) (st: V'.t->D'.t): address list =
+  let reachable_vars' (ask: Q.ask) (args: address list) (gs:glob_fun) get_gs (st: V'.t->D'.t): address list =
     (* We begin looking at the parameters: *)
     let argset = List.fold_right (AD.join) args empty in
     let workset = ref argset in
@@ -1570,7 +1841,7 @@ struct
       (* ok, let's visit all the variables in the workset and collect the new variables *)
       let visit_and_collect (var: AD.elt) (acc: address): address =
         let var = AD.singleton var in (* Very bad hack! Pathetic really! *)
-        AD.union (reachable_from_address' ask gs st var) acc in
+        AD.union (reachable_from_address' ask gs get_gs st var) acc in
       let collected = AD.fold visit_and_collect !workset empty in
       (* And here we remove the already visited variables *)
       workset := AD.diff collected !visited
@@ -1616,6 +1887,19 @@ struct
       | `Address a when AD.equal a (AD.null_ptr ()) -> []
       | `Address a when not (AD.is_top a) ->
         let rble = reachable_vars ask [a] gs st in
+        if M.tracing then
+          M.trace "collect_funargs" "%a = %a\n" AD.pretty a (d_list ", " AD.pretty) rble;
+        rble
+      | _-> []
+    in
+    List.concat (List.map do_exp exps)
+
+  let collect_funargs' ask (gs:glob_fun) set_gs (st:V'.t->D'.t) (exps: exp list) =
+    let do_exp e =
+      match eval_rv' ask gs set_gs st e with
+      | `Address a when AD.equal a (AD.null_ptr ()) -> []
+      | `Address a when not (AD.is_top a) ->
+        let rble = reachable_vars' ask [a] gs set_gs st in
         if M.tracing then
           M.trace "collect_funargs" "%a = %a\n" AD.pretty a (d_list ", " AD.pretty) rble;
         rble
@@ -1714,7 +1998,7 @@ struct
 
   let eval_funvar' ctx fval: varinfo list =
     try
-      let fp = eval_fv' ctx.ask' ctx.global' ctx.local' fval in
+      let fp = eval_fv' ctx.ask' ctx.global' ctx.sideg' ctx.local' fval in
       if AD.mem (Addr.unknown_ptr ()) fp then begin
         M.warn ("Function pointer " ^ Pretty.sprint 100 (d_exp () fval) ^ " may contain unknown functions.");
         dummyFunDec.svar :: AD.to_var_may fp
@@ -1883,14 +2167,14 @@ struct
     | Q.EvalFunvar e ->
       begin
         let fs = eval_funvar' ctx e in
-                 (* Messages.report ("Base: I should know it! "^string_of_int (List.length fs)); *)
+        (* Messages.report ("Base: I should know it! "^string_of_int (List.length fs)); *)
         `LvalSet (List.fold_left (fun xs v -> Q.LS.add (v,`NoOffset) xs) (Q.LS.empty ()) fs)
       end
     | _ -> Q.Result.top ()
 
-(**************************************************************************
-   * Function calls
-   **************************************************************************)
+  (**************************************************************************
+     * Function calls
+     **************************************************************************)
 
   let make_entry ctx ?nfl:(nfl=(snd ctx.local)) fn args: D.t =
     let cpa,fl as st = ctx.local in
@@ -1908,23 +2192,51 @@ struct
     let new_cpa = CPA.add_list_fun reachable (fun v -> CPA.find v cpa) new_cpa in
     new_cpa, nfl
 
-  let make_entry' ctx ?nfl:(nfl=get_flag (ctx.local' `Flag)) fn args : V'.t -> D'.t = function
-    | `Flag -> `Right nfl
+  let rec var_index_of n x = function
+    | [] -> None
+    | y::ys when x.vid=y.vid  -> Some n
+    | _::ys -> var_index_of (n+1) x ys
+
+  let rec make_entry' ctx ?nfl:(nfl=ctx.local' `Flag) fn args : V'.t -> D'.t = function
+    | `Flag -> 
+      let fl = nfl in
+      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        begin match ctx.global' !liveGlobs with
+          | `Address addrs when not (AD.is_top addrs) ->
+            let one_addr ad = 
+              let gs = Addr.to_var_may ad in
+              let one_glob g = 
+                let d = get_vd (make_entry' ctx ~nfl:nfl fn args (`V g)) in
+                ctx.sideg' g d
+              in
+              List.iter one_glob gs
+            in
+            AD.iter one_addr addrs
+          | `Bot -> ()
+          | _ -> 
+            M.warn "liveGlobs is top"
+        end;
+      fl
     | `V v when V.is_global v -> begin
-        let fl = get_flag (ctx.local' `Flag) in
+        let fl = get_flag nfl in
         if not (!GU.earlyglobs || Flag.is_multi fl) || is_private' ctx.ask' fl v then
           ctx.local' (`V v)
         else
           `Left (VD.bot ())
       end
     | `V v ->
-      let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.local') args in
-      let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.local' in
-      let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
-      if List.exists inAD rea then
-        D'.top ()
-      else
-        ctx.local' (`V v)
+      let fundec = Cilfacade.getdec fn in
+      match var_index_of 0 v fundec.sformals with
+      | Some n ->
+        assign' ctx (Var v, NoOffset) (List.nth args n) (`V v)
+      | None ->
+        let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local') args in
+        let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.sideg' ctx.local' in
+        let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
+        if List.exists inAD rea then
+          D'.top ()
+        else
+          ctx.local' (`V v)
 
 
   let enter ctx lval fn args : (D.t * D.t) list =
@@ -1983,8 +2295,6 @@ struct
         | _ -> []
       end
     | `ThreadCreate (start,ptc_arg) -> begin
-        (* extra sync so that we do not analyze new threads with bottom global invariant *)
-        publish_all ctx;
         (* Collect the threads. *)
         let start_addr = eval_tv ctx.ask ctx.global ctx.local start in
         List.map (create_thread (Some ptc_arg)) (AD.to_var_may start_addr)
@@ -2000,6 +2310,33 @@ struct
         List.map (create_thread None) addrs
       end
     | _ ->  []
+
+  let forkfun' ctx (lv: lval option) (f: varinfo) (args: exp list) : unit =
+    let fl = ctx.local' `Flag in
+    if D'.is_bot fl then () else begin
+      let create_thread v =
+        ctx.spawn' v (`Right (create_tid v))
+      in
+      match LF.classify f.vname args with
+      | `ThreadCreate (start,_) -> begin
+
+          (* Collect the threads. *)
+          let start_addr = eval_tv' ctx.ask' ctx.global' ctx.sideg' ctx.local' start in
+          List.iter (create_thread ) (AD.to_var_may start_addr)
+        end
+      | `Unknown _ -> begin
+          let args =
+            match LF.get_invalidate_action f.vname with
+            | Some fnc -> fnc `Write  args
+            | None -> args
+          in
+          let flist = collect_funargs' ctx.ask' ctx.global' ctx.sideg' ctx.local' args in
+          let addrs = List.concat (List.map AD.to_var_may flist) in
+          List.iter create_thread addrs
+        end
+      | _ ->  ()
+    end
+
 
   let assert_fn ctx e warn change =
     let check_assert e st =
@@ -2034,8 +2371,38 @@ struct
         newst
       end
 
-  let special' ctx (lv:lval option) (f: varinfo) (args: exp list): V'.t -> D'.t = function
-    | `Flag -> ctx.local' `Flag
+  let rec special' ctx (lv:lval option) (f: varinfo) (args: exp list): V'.t -> D'.t = function
+    | `Flag -> 
+      forkfun' ctx lv f args;
+      let fl = ctx.local' `Flag in
+      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        begin match ctx.global' !liveGlobs with
+          | `Address addrs when not (AD.is_top addrs) ->
+            let one_addr ad = 
+              let gs = Addr.to_var_may ad in
+              let one_glob g = 
+                let d = get_vd (special' ctx lv f args (`V g)) in
+                ctx.sideg' g d
+              in
+              List.iter one_glob gs
+            in
+            AD.iter one_addr addrs
+          | `Bot -> ()
+          | _ -> 
+            M.warn "liveGlobs is top"
+        end;
+      begin match LF.classify f.vname args with
+        | `ThreadCreate (_,_) ->
+          `Right (Flag.make_main (get_flag fl))
+        | _ -> fl
+      end
+    | `V v when is_global ctx.ask' v -> 
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then fl 
+      else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+        `Left (ctx.global' v)
+      else 
+        ctx.local' (`V v)
     | `V v  -> ctx.local' (`V v)
 
   let special ctx (lv:lval option) (f: varinfo) (args: exp list) =
@@ -2196,22 +2563,35 @@ struct
         List.map (fun f -> f (fun lv -> set ctx.ask ctx.global st (eval_lv ctx.ask ctx.global st lv))) (LF.effects_for f.vname args) |> BatList.fold_left D.meet st
       end
 
-  let special' ctx (lv:lval option) (f: varinfo) (args: exp list): V'.t -> D'.t = function
-    | `Flag -> ctx.local' `Flag
-    | `V v  -> ctx.local' (`V v)
-
-
   (* val combine' : (V'.t, D'.t, G'.t) ctx' ->
         lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t *)
-  let combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function
-    | `Flag -> after `Flag
+  let rec combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function
+    | `Flag -> 
+      let fl = after `Flag in
+      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        begin match ctx.global' !liveGlobs with
+          | `Address addrs when not (AD.is_top addrs) ->
+            let one_addr ad = 
+              let gs = Addr.to_var_may ad in
+              let one_glob g = 
+                let d = get_vd (combine' ctx lval fexp f args after (`V g)) in
+                ctx.sideg' g d
+              in
+              List.iter one_glob gs
+            in
+            AD.iter one_addr addrs
+          | `Bot -> ()
+          | _ -> 
+            M.warn "liveGlobs is top"
+        end;
+      fl
     | `V v  ->
       begin match lval with
         | Some (Var v', NoOffset) when v.vid = v'.vid ->
           after (`V (return_varinfo ()))
         | _ ->
-          let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.local') args in
-          let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.local' in
+          let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local') args in
+          let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.sideg' ctx.local' in
           let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
           let oldv =
             if (not v.vglob) && not (List.exists inAD rea) then
@@ -2222,7 +2602,7 @@ struct
           let oldv = get_vd oldv in
           begin match lval with
             | Some (Var v', os) when v.vid = v'.vid ->
-              let offs = convert_offset' ctx.ask' ctx.global' after os in
+              let offs = convert_offset' ctx.ask' ctx.global' ctx.sideg' after os in
               let ret_val = get_vd (after (`V (return_varinfo ()))) in
               `Left (VD.update_offset oldv offs ret_val)
             | _ -> `Left oldv

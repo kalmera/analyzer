@@ -49,6 +49,8 @@ let printAllCategories ch =
 
 (* {4 category [Std]} *)
 let _ = ()
+      ; reg Std "runexp"         "false"         "Analyze with more variables."
+      ; reg Std "runcomb"        "false"         "Analyze with less variables."
       ; reg Std "outfile"         ""             "File to print output to."
       ; reg Std "includes"        "[]"           "List of directories to include."
       ; reg Std "kernel_includes" "[]"           "List of kernel directories to include."
@@ -194,7 +196,7 @@ let _ = ()
 let default_schema = "\
 { 'id'              : 'root'
 , 'type'            : 'object'
-, 'required'        : ['outfile', 'includes', 'kernel_includes', 'custom_includes', 'custom_incl', 'custom_libc', 'justcil', 'justcfg', 'dopartial', 'printstats', 'gccwarn', 'noverify', 'mainfun', 'exitfun', 'otherfun', 'allglobs', 'keepcpp', 'merge-conflicts', 'cppflags', 'kernel', 'dump_globs', 'result', 'solver', 'allfuns', 'nonstatic', 'colors', 'g2html']
+, 'required'        : ['runexp', 'runcomb', 'outfile', 'includes', 'kernel_includes', 'custom_includes', 'custom_incl', 'custom_libc', 'justcil', 'justcfg', 'dopartial', 'printstats', 'gccwarn', 'noverify', 'mainfun', 'exitfun', 'otherfun', 'allglobs', 'keepcpp', 'merge-conflicts', 'cppflags', 'kernel', 'dump_globs', 'result', 'solver', 'allfuns', 'nonstatic', 'colors', 'g2html']
 , 'additionalProps' : false
 , 'properties' :
   { 'ana' :
@@ -217,6 +219,8 @@ let default_schema = "\
   , 'questions' :
     { 'file'            : ''
     }
+  , 'runexp'          : {}
+  , 'runcomb'         : {}
   , 'outfile'         : {}
   , 'includes'        : {}
   , 'kernel_includes' : {}

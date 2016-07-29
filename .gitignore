@@ -38,3 +38,5 @@ ocamlprof.dump
 arinc
 
 mytest/
+
+.vscode/

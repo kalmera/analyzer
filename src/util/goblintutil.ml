@@ -8,6 +8,8 @@ open Json
 open JsonParser
 open JsonLexer
 
+let startfuns: fundec list ref = ref [] 
+
 let return_varstore = ref dummyFunDec.svar
 let return_varinfo () = !return_varstore
 
