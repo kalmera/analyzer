@@ -388,13 +388,20 @@ struct
     (* And fold over the list starting from the store turned wstore: *)
     List.fold_left f store lval_value_list
 
-  let set_many' a (gs:glob_fun) set_gs (st: V'.t -> D'.t) lval_value_list v: D'.t =
+  let set_many_inv' a (gs:glob_fun) set_gs (st: V'.t -> D'.t) lval_value_list v: D'.t =
+    let fl = get_flag (st `Flag) in
+    let old_value = 
+      if (!GU.earlyglobs || Flag.is_multi fl) && is_global a v then
+        `Left (gs v)
+      else
+        st (`V v)
+    in
     (* Maybe this can be done with a simple fold *)
     let f r ((lval:AD.t),(value:value)) =
       D'.join r (set' a gs set_gs st lval value v)
     in
     (* And fold over the list starting from the store turned wstore: *)
-    List.fold_left f (D'.bot ()) lval_value_list 
+    List.fold_left f (old_value) lval_value_list 
 
   let join_writes (st1,gl1) (st2,gl2) =
     (* It's the join of the local state and concatenate the global deltas, I'm
@@ -1920,7 +1927,7 @@ struct
         List.exists (fun x -> List.mem x.vname my_favorite_things) (AD.to_var_may x)
       in
       let invalids' = List.filter (fun (x,_) -> not (is_fav_addr x)) invalids in
-      set_many' ask gs set_gs st invalids' v
+      set_many_inv' ask gs set_gs st invalids' v
 
   (* Variation of the above for yet another purpose, uhm, code reuse? *)
   let collect_funargs ask (gs:glob_fun) (st:store) (exps: exp list) =
@@ -2442,13 +2449,13 @@ struct
           else
             fl
       end
-    | `V v when is_global ctx.ask' v -> 
+    (*| `V v when is_global ctx.ask' v -> 
       let fl = ctx.local' `Flag in
       if D'.is_bot fl then fl 
       else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
         `Left (ctx.global' v)
       else 
-        ctx.local' (`V v)
+        ctx.local' (`V v)*)
     | `V v  -> 
         let lv_list =
           match lv with
@@ -2623,47 +2630,52 @@ struct
         lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t *)
   let rec combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function
     | `Flag -> 
-      let fl = after `Flag in
-      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
-        begin match ctx.global' !liveGlobs with
-          | `Address addrs when not (AD.is_top addrs) ->
-            let one_addr ad = 
-              let gs = Addr.to_var_may ad in
-              let one_glob g = 
-                let d = get_vd (combine' ctx lval fexp f args after (`V g)) in
-                ctx.sideg' g d
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then fl else begin
+        let fl = after `Flag in
+        if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+          begin match ctx.global' !liveGlobs with
+            | `Address addrs when not (AD.is_top addrs) ->
+              let one_addr ad = 
+                let gs = Addr.to_var_may ad in
+                let one_glob g = 
+                  let d = get_vd (combine' ctx lval fexp f args after (`V g)) in
+                  ctx.sideg' g d
+                in
+                List.iter one_glob gs
               in
-              List.iter one_glob gs
-            in
-            AD.iter one_addr addrs
-          | `Bot -> ()
-          | _ -> 
-            M.warn "liveGlobs is top"
-        end;
-      fl
-    | `V v  ->
-      begin match lval with
-        | Some (Var v', NoOffset) when v.vid = v'.vid ->
-          after (`V (return_varinfo ()))
-        | _ ->
-          let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local') args in
-          let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.sideg' ctx.local' in
-          let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
-          let oldv =
-            if (not v.vglob) && not (List.exists inAD rea) then
-              ctx.local' (`V v)
-            else
-              after (`V v)
-          in
-          let oldv = get_vd oldv in
-          begin match lval with
-            | Some (Var v', os) when v.vid = v'.vid ->
-              let offs = convert_offset' ctx.ask' ctx.global' ctx.sideg' after os in
-              let ret_val = get_vd (after (`V (return_varinfo ()))) in
-              `Left (VD.update_offset oldv offs ret_val)
-            | _ -> `Left oldv
-          end
+              AD.iter one_addr addrs
+            | `Bot -> ()
+            | _ -> 
+              M.warn "liveGlobs is top"
+          end;
+        fl
       end
+    | `V v  ->
+      let fl = ctx.local' `Flag in
+      if D'.is_bot fl then fl else
+        begin match lval with
+          | Some (Var v', NoOffset) when v.vid = v'.vid ->
+            after (`V (return_varinfo ()))
+          | _ ->
+            let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local') args in
+            let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.sideg' ctx.local' in
+            let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
+            let oldv =
+              if (not v.vglob) && not (List.exists inAD rea) then
+                ctx.local' (`V v)
+              else
+                after (`V v)
+            in
+            let oldv = get_vd oldv in
+            begin match lval with
+              | Some (Var v', os) when v.vid = v'.vid ->
+                let offs = convert_offset' ctx.ask' ctx.global' ctx.sideg' after os in
+                let ret_val = get_vd (after (`V (return_varinfo ()))) in
+                `Left (VD.update_offset oldv offs ret_val)
+              | _ -> `Left oldv
+            end
+        end
 
 
   let combine ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: D.t) : D.t =
