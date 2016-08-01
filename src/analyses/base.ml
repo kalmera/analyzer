@@ -35,7 +35,7 @@ let is_precious_glob v = List.exists (fun x -> v.vname = Json.string x) !preciou
 
 let privatization = ref false
 let is_private (a: Q.ask) (_,fl) (v: varinfo): bool =
-  !privatization &&
+  false &&
   (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
 
@@ -48,7 +48,7 @@ let get_flag = function
   | `Right f -> f
 
 let is_private' (a: Q.ask) fl (v: varinfo): bool =
-  !privatization &&
+  false &&
   (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
 
@@ -1425,7 +1425,7 @@ struct
   let rec assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
     | `Flag -> 
       let f = ctx.local' `Flag in
-      if D'.is_top f then 
+      if D'.is_bot f then 
         f 
       else begin
         match ctx.global' !liveGlobs with
@@ -1447,12 +1447,10 @@ struct
       end
     | `V v  ->
       let fl = ctx.local' `Flag in
-      if D'.is_bot fl then D'.bot () else begin
+      if D'.is_bot fl then fl else begin
         match may_modify_sem ctx lval v with
         | None when is_global ctx.ask' v -> 
-          let fl = ctx.local' `Flag in
-          if D'.is_bot fl then fl 
-          else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+          if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
             `Left (ctx.global' v)
           else 
             ctx.local' (`V v)
@@ -1900,34 +1898,16 @@ struct
     | `Flag ->
       D'.top ()
     | `V v ->
-      (* To invalidate a single address, we create a pair with its corresponding
-      * top value. *)
-      let invalidate_address st a =
-        let t = AD.get_type a in
-        let v = get' ask gs set_gs st a in
-        let nv =  VD.invalidate_value t v in
-        (a, nv)
-      in
-      (* We define the function that invalidates all the values that an address
-      * expression e may point to *)
-      let invalidate_exp e =
-        match eval_rv' ask gs set_gs st e with
-        (*a null pointer is invalid by nature*)
-        | `Address a when AD.equal a (AD.null_ptr()) -> []
-        | `Address a when not (AD.is_top a) ->
-          List.map (invalidate_address st) (reachable_vars' ask [a] gs set_gs st)
-        | `Int _ -> []
-        | _ -> let expr = sprint ~width:80 (d_exp () e) in
-          M.warn ("Failed to invalidate unknown address: " ^ expr); []
-      in
-      (* We concatMap the previous function on the list of expressions. *)
-      let invalids = List.concat (List.map invalidate_exp exps) in
-      let my_favorite_things = List.map Json.string !precious_globs in
-      let is_fav_addr x =
-        List.exists (fun x -> List.mem x.vname my_favorite_things) (AD.to_var_may x)
-      in
-      let invalids' = List.filter (fun (x,_) -> not (is_fav_addr x)) invalids in
-      set_many_inv' ask gs set_gs st invalids' v
+      let fl = get_flag (st `Flag) in
+      let vals = List.map (eval_rv' ask gs set_gs st) exps in
+      let rea  = reachable_vars' ask (get_ptrs vals) gs set_gs st in
+      let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
+      if List.exists inAD rea then
+        `Left (top_value' ask gs set_gs st v.vtype)
+      else if (!GU.earlyglobs || Flag.is_multi fl) && is_global ask v then
+        `Left (gs v)
+      else
+        st (`V v)
 
   (* Variation of the above for yet another purpose, uhm, code reuse? *)
   let collect_funargs ask (gs:glob_fun) (st:store) (exps: exp list) =
@@ -2422,51 +2402,49 @@ struct
 
   let rec special' ctx (lv:lval option) (f: varinfo) (args: exp list): V'.t -> D'.t = function
     | `Flag -> 
-      forkfun' ctx lv f args;
       let fl = ctx.local' `Flag in
-      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
-        begin match ctx.global' !liveGlobs with
-          | `Address addrs when not (AD.is_top addrs) ->
-            let one_addr ad = 
-              let gs = Addr.to_var_may ad in
-              let one_glob g = 
-                let d = get_vd (special' ctx lv f args (`V g)) in
-                ctx.sideg' g d
+      if D'.is_bot fl then fl else begin
+        if not (get_bool "exp.single-threaded") then
+          forkfun' ctx lv f args;
+        if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+          begin match ctx.global' !liveGlobs with
+            | `Address addrs when not (AD.is_top addrs) ->
+              let one_addr ad = 
+                let gs = Addr.to_var_may ad in
+                let one_glob g = 
+                  let d = get_vd (special' ctx lv f args (`V g)) in
+                  ctx.sideg' g d
+                in
+                List.iter one_glob gs
               in
-              List.iter one_glob gs
-            in
-            AD.iter one_addr addrs
-          | `Bot -> ()
-          | _ -> 
-            M.warn "liveGlobs is top"
-        end;
-      begin match LF.classify f.vname args with
-        | `ThreadCreate (_,_) ->
-          `Right (Flag.make_main (get_flag fl))
-        | _ -> 
-          if not (get_bool "exp.single-threaded")  then
+              AD.iter one_addr addrs
+            | `Bot -> ()
+            | _ -> 
+              M.warn "liveGlobs is top"
+          end;
+        begin match LF.classify f.vname args with
+          | `ThreadCreate (_,_) ->
             `Right (Flag.make_main (get_flag fl))
-          else
-            fl
+          | _ -> 
+            if not (get_bool "exp.single-threaded")  then
+              `Right (Flag.make_main (get_flag fl))
+            else
+              fl
+        end
       end
-    (*| `V v when is_global ctx.ask' v -> 
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then fl 
-      else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
-        `Left (ctx.global' v)
-      else 
-        ctx.local' (`V v)*)
     | `V v  -> 
         let lv_list =
           match lv with
           | Some x -> [mkAddrOrStartOf x]
           | None -> []
         in
-        begin match LF.get_invalidate_action f.vname with
-          | Some fnc -> invalidate' ctx.ask' ctx.global' ctx.sideg' ctx.local' (lv_list @ (fnc `Write  args)) (`V v);
-          | None -> 
-              invalidate' ctx.ask' ctx.global' ctx.sideg' ctx.local' [mkAddrOf (Var v, NoOffset)] (`V v) 
-        end
+        let vars =
+          match LF.get_invalidate_action f.vname with
+          | Some fnc -> lv_list @ fnc `Write args
+          | None -> lv_list @ args
+        in 
+          invalidate' ctx.ask' ctx.global' ctx.sideg' ctx.local' vars (`V v) 
+
 
   let special ctx (lv:lval option) (f: varinfo) (args: exp list) =
     (*    let heap_var = heap_var !Tracing.current_loc in*)

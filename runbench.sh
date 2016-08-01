@@ -10,9 +10,9 @@ make
 time ./goblint mytest/433.milc_comb.c --enable runexp  --enable exp.single-threaded --sets result none
 time ./goblint mytest/433.milc_comb.c --enable runcomb --enable exp.single-threaded --sets result none
 
-# scx200_gpio linux char driver benchmark: runexp -- each var is separate;  runcomb -- all vars together
-time ./goblint mytest/scx200_gpio.c   --enable runexp  --enable kernel --sets result none 
-time ./goblint mytest/scx200_gpio.c   --enable runcomb --enable kernel --sets result none
+# # scx200_gpio linux char driver benchmark: runexp -- each var is separate;  runcomb -- all vars together
+# time ./goblint mytest/scx200_gpio.c   --enable runexp  --enable kernel --sets result none 
+# time ./goblint mytest/scx200_gpio.c   --enable runcomb --enable kernel --sets result none
 
 # bsr linux char driver benchmark: runexp -- each var is separate;  runcomb -- all vars together
 time ./goblint mytest/bsr.c   --enable runexp  --enable kernel --sets result none 
