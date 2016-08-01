@@ -37,6 +37,4 @@ gmon.out
 ocamlprof.dump
 arinc
 
-mytest/
-
 .vscode/

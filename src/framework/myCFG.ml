@@ -213,7 +213,8 @@ let createCFG (file: file) =
           Hashtbl.replace globals v.vid ()
       | GFun (fd,loc) ->
         cur_fn := fd.svar.vname;
-        incr fun_count;
+        if fd.sallstmts <> [] then
+          incr fun_count;
         Hashtbl.add locals fd.svar.vname (List.length fd.sformals + List.length fd.slocals);
         if Messages.tracing then Messages.trace "cfg" "Looking at the function %s.\n" fd.svar.vname;
         (* Walk through the parameters and pre-process them a bit... *)

@@ -407,7 +407,7 @@ struct
 
     Goblintutil.startfuns := startfuns;
     let funs = startfuns @ exitfuns in
-    let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty,`V (return_varinfo ()))) funs in
+    let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty,Spec.V'.flag)) funs in
     (* let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty)) startfuns in *)
 
     let local_xml = ref (Result.create 0) in

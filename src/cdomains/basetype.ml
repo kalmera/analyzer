@@ -239,11 +239,11 @@ struct
   let short _ x = "<stmt>"
   let toXML_f _ x = Xml.Element ("Stmt", [("id", string_of_int x.sid);
                                           ("sourcecode", Pretty.sprint ~width:0 (dn_stmt () x))], [])
-  let pretty_f _ () x =
-    match x.skind with
+  let pretty_f _ () x = d_stmt () x
+    (*match x.skind with
     | Instr (y::ys) -> dn_instr () y
     | If (exp,_,_,_) -> dn_exp () exp
-    | _ -> dn_stmt () x
+    | _ -> dn_stmt () x*)
 
   let toXML m = toXML_f short m
   let pretty () x = pretty_f short () x

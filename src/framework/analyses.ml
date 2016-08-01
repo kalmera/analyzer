@@ -331,9 +331,9 @@ struct
 
   let pretty () (n,d,v) =
     match n with
-    | MyCFG.Statement s -> dprintf "node:\"%a\", var: %a" Basetype.CilStmt.pretty s V.pretty v
-    | MyCFG.Function f -> dprintf "call: %s, var: %a" f.vname V.pretty v
-    | MyCFG.FunctionEntry f -> dprintf "entry: %s, var: %a" f.vname V.pretty v
+    | MyCFG.Statement s -> dprintf "node:\"%a\", var: %a cs:%a" Basetype.CilStmt.pretty s V.pretty v CS.pretty d
+    | MyCFG.Function f -> dprintf "call: %s, var: %a cs:%a" f.vname V.pretty v CS.pretty d
+    | MyCFG.FunctionEntry f -> dprintf "entry: %s, var: %a cs:%a" f.vname V.pretty v CS.pretty d
 
   let pretty_trace () x =
     dprintf "%a on %a" pretty x Basetype.ProgLines.pretty (getLocation x)
