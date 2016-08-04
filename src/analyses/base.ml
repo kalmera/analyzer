@@ -1034,7 +1034,7 @@ struct
     | TPtr _ -> `Address (AD.join (AD.safe_ptr ()) (AD.null_ptr ()))
     | TComp ({cstruct=true} as ci,_) -> `Struct (init_comp ci)
     | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.top ())
-    | TArray _ -> bot_value a gs st t
+    | TArray _ -> `Array (CArrays.top ())
     | TNamed ({ttype=t}, _) -> init_value a gs st t
     | _ -> `Top
 
@@ -1050,7 +1050,7 @@ struct
     | TPtr _ -> `Address (AD.join (AD.safe_ptr ()) (AD.null_ptr ()))
     | TComp ({cstruct=true} as ci,_) -> `Struct (init_comp' ci)
     | TComp ({cstruct=false},_) -> `Union (ValueDomain.Unions.top ())
-    | TArray _ -> bot_value' a gs set_gs st t
+    | TArray _ -> `Array (CArrays.top ())
     | TNamed ({ttype=t}, _) -> init_value' a gs set_gs st t
     | _ -> `Top
 
@@ -1081,7 +1081,11 @@ struct
       begin
         match xi with
         | Some {init=Some i} ->
-          `Left (eval_init (init_value' ask glob set_glob local x.vtype) i)
+          let iv = eval_init (init_value' ask glob set_glob local x.vtype) i in
+          if VD.is_bot iv then 
+            `Left (VD.top ())
+          else
+            `Left iv
         | _ ->
           D'.top ()
       end
@@ -1425,9 +1429,7 @@ struct
   let rec assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
     | `Flag -> 
       let f = ctx.local' `Flag in
-      if D'.is_bot f then 
-        f 
-      else begin
+      if (not (D'.is_bot f)) && (!GU.earlyglobs || Flag.is_multi (get_flag f)) then begin
         match ctx.global' !liveGlobs with
         | `Address addrs when not (AD.is_top addrs) ->
           let one_addr ad = 
@@ -1438,13 +1440,12 @@ struct
             in
             List.iter one_glob gs
           in
-          AD.iter one_addr addrs;
-          f
-        | `Bot -> f
+          AD.iter one_addr addrs
+        | `Bot -> ()
         | _ -> 
-          M.warn "liveGlobs is top";
-          f
-      end
+          M.warn "liveGlobs is top"
+      end;
+      f
     | `V v  ->
       let fl = ctx.local' `Flag in
       if D'.is_bot fl then fl else begin
@@ -1607,6 +1608,7 @@ struct
   let rec branch' ctx (exp:exp) (tv:bool) (v:V'.t): D'.t =
     let fl = ctx.local' `Flag in
     if v=`Flag then
+      if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
       begin match ctx.global' !liveGlobs with
         | `Address addrs when not (AD.is_top addrs) ->
           let one_addr ad = 
@@ -1655,7 +1657,7 @@ struct
   let rec body' ctx (f:fundec): V'.t -> D'.t = function
     | `Flag -> 
       let fl = ctx.local' `Flag in
-      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+      if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
         begin match ctx.global' !liveGlobs with
           | `Address addrs when not (AD.is_top addrs) ->
             let one_addr ad = 
@@ -1701,7 +1703,7 @@ struct
   let rec return' ctx exp fundec : V'.t -> D'.t = function
     | `Flag -> 
       let fl = ctx.local' `Flag in
-      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+      if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
         begin match ctx.global' !liveGlobs with
           | `Address addrs when not (AD.is_top addrs) ->
             let one_addr ad = 
@@ -2229,7 +2231,7 @@ struct
   let rec make_entry' ctx ?nfl:(nfl=ctx.local' `Flag) fn args : V'.t -> D'.t = function
     | `Flag -> 
       let fl = nfl in
-      if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+      if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
         begin match ctx.global' !liveGlobs with
           | `Address addrs when not (AD.is_top addrs) ->
             let one_addr ad = 
@@ -2313,9 +2315,9 @@ struct
       end
     | _ ->  []
 
-  let forkfun' ctx (lv: lval option) (f: varinfo) (args: exp list) : unit =
+  let forkfun' ctx (lv: lval option) (f: varinfo) (args: exp list) : bool =
     let fl = ctx.local' `Flag in
-    if D'.is_bot fl then () else begin
+    if D'.is_bot fl then false else begin
       let create_thread v =
         ctx.spawn' v (`Right (create_tid v))
       in
@@ -2323,7 +2325,8 @@ struct
       | `ThreadCreate (start,_) -> begin
           (* Collect the threads. *)
           let start_addr = eval_tv' ctx.ask' ctx.global' ctx.sideg' ctx.local' start in
-          List.iter (create_thread ) (AD.to_var_may start_addr)
+          List.iter (create_thread ) (AD.to_var_may start_addr);
+          true
         end
       | `Unknown _ -> begin
           let args =
@@ -2333,9 +2336,10 @@ struct
           in
           let flist = collect_funargs' ctx.ask' ctx.global' ctx.sideg' ctx.local' args in
           let addrs = List.concat (List.map AD.to_var_may flist) in
-          List.iter create_thread addrs
+          List.iter create_thread addrs;
+          true
         end
-      | _ ->  ()
+      | _ ->  false
     end
 
 
@@ -2376,9 +2380,12 @@ struct
     | `Flag -> 
       let fl = ctx.local' `Flag in
       if D'.is_bot fl then fl else begin
-        if not (get_bool "exp.single-threaded") then
-          forkfun' ctx lv f args;
-        if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        let forked = 
+          if not (get_bool "exp.single-threaded") then
+            forkfun' ctx lv f args
+          else false
+        in
+        if forked || !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
           begin match ctx.global' !liveGlobs with
             | `Address addrs when not (AD.is_top addrs) ->
               let one_addr ad = 
