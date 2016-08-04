@@ -135,9 +135,9 @@ let invalidate_actions = ref [
     "bzero", writes [1]; (*keep 1*)
     "connect", readsAll;          (*safe*)
     "fclose", readsAll;           (*safe*)
-    "fflush", writesAll;          (*unsafe*)
+    "fflush", readsAll;          (*unsafe*)
     "fopen", readsAll;            (*safe*)
-    "fprintf", writes [1];          (*keep [1]*)
+    "fprintf", readsAll;          (*keep [1]*)
     "fread", writes [1];            (*keep [1]*)
     "free", writesAll; (*unsafe*)
     "fwrite", readsAll;(*safe*)
@@ -374,7 +374,9 @@ let invalidate_actions = ref [
     "pthread_create", writes [1];
     "__builtin_prefetch", readsAll;
     "idr_pre_get", readsAll;
-    "zil_replay", writes [1;2;3;5]
+    "zil_replay", writes [1;2;3;5];
+    "ctime", readsAll;
+    "time", readsAll;
   ]
 let add_invalidate_actions xs = invalidate_actions := xs @ !invalidate_actions
 
