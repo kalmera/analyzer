@@ -128,10 +128,10 @@ struct
   let name = "base"
   let startstate v = CPA.bot (), Flag.start_single v
 
-  let otherstate v = CPA.bot (), Flag.start_multi v
+  let otherstate v = CPA.top (), Flag.top ()
 
   let otherstate' = function
-    | `V v  -> `Left  (VD.bot ())
+    | `V v  -> `Left  (VD.top ())
     | `Flag -> `Right (Flag.top ())
 
   let exitstate  v = CPA.bot (), Flag.start_main v
@@ -2296,33 +2296,6 @@ struct
         v, (cpa, create_tid v)
     in
     match LF.classify f.vname args with
-    (* handling thread creations *)
-    | `Unknown "LAP_Se_SetPartitionMode" when List.length args = 2 -> begin
-        let mode = List.hd @@ List.map (fun x -> stripCasts (constFold false x)) args in
-        match ctx.ask (Queries.EvalInt mode) with
-        | `Int i when i=3L ->
-          let a = match ctx.global tasks_var with `Address a -> a | _ -> AD.empty () in
-          let r = AD.to_var_may a |> List.map (create_thread None) in
-          ctx.sideg tasks_var (`Address (AD.empty ()));
-          ignore @@ printf "base: SetPartitionMode NORMAL: spawning %i processes!\n" (List.length r);
-          r
-        | _ -> []
-      end
-    | `Unknown "LAP_Se_CreateProcess"
-    | `Unknown "LAP_Se_CreateErrorHandler" -> begin
-        match List.map (fun x -> stripCasts (constFold false x)) args with
-        (* | [proc_att;AddrOf id;AddrOf r] -> (* CreateProcess *) *)
-        (* | [entry_point;stack_size;AddrOf r] -> (* CreateErrorHandler *) *)
-        | [entry_point; _; AddrOf r] -> (* both *)
-          let pa = eval_fv ctx.ask ctx.global ctx.local entry_point in
-          let reach_fs = reachable_vars ctx.ask [pa] ctx.global ctx.local in
-          let reach_fs = List.concat (List.map AD.to_var_may reach_fs) |> List.filter (fun v -> isFunctionType v.vtype) in
-          let a = match ctx.global tasks_var with `Address a -> a | _ -> AD.empty () in
-          ctx.sideg tasks_var (`Address (List.map AD.from_var reach_fs |> List.fold_left AD.join a));
-          (* List.map (create_thread None) reach_fs *)
-          []
-        | _ -> []
-      end
     | `ThreadCreate (start,ptc_arg) -> begin
         (* Collect the threads. *)
         let start_addr = eval_tv ctx.ask ctx.global ctx.local start in
@@ -2348,7 +2321,6 @@ struct
       in
       match LF.classify f.vname args with
       | `ThreadCreate (start,_) -> begin
-
           (* Collect the threads. *)
           let start_addr = eval_tv' ctx.ask' ctx.global' ctx.sideg' ctx.local' start in
           List.iter (create_thread ) (AD.to_var_may start_addr)
@@ -2454,111 +2426,8 @@ struct
     let cpa,fl as st = ctx.local in
     let gs = ctx.global in
     match LF.classify f.vname args with
-    | `Unknown "F59" (* strcpy *)
-    | `Unknown "F60" (* strncpy *)
-    | `Unknown "F63" (* memcpy *)
-      ->
-      begin match args with
-        | [dst; src]
-        | [dst; src; _] ->
-          (* let dst_val = eval_rv ctx.ask ctx.global ctx.local dst in *)
-          (* let src_val = eval_rv ctx.ask ctx.global ctx.local src in *)
-          (* begin match dst_val with *)
-          (* | `Address ls -> set_savetop ctx.ask ctx.global ctx.local ls src_val *)
-          (* | _ -> ignore @@ Pretty.printf "strcpy: dst %a may point to anything!\n" d_exp dst; *)
-          (*     ctx.local *)
-          (* end *)
-          let rec get_lval exp = match stripCasts exp with
-            | Lval x | AddrOf x | StartOf x -> x
-            | BinOp (PlusPI, e, i, _)
-            | BinOp (MinusPI, e, i, _) -> get_lval e
-            | x ->
-              ignore @@ Pretty.printf "strcpy: dst is %a!\n" d_plainexp dst;
-              failwith "strcpy: expecting first argument to be a pointer!"
-          in
-          assign ctx (get_lval dst) src
-        | _ -> M.bailwith "strcpy arguments are strange/complicated."
-      end
-    | `Unknown "F1" ->
-      begin match args with
-        | [dst; data; len] -> (* memset: write char to dst len times *)
-          let dst_lval = mkMem ~addr:dst ~off:NoOffset in
-          assign ctx dst_lval data (* this is only ok because we use ArrayDomain.Trivial per default, i.e., there's no difference between the first element or the whole array *)
-        | _ -> M.bailwith "memset arguments are strange/complicated."
-      end
-    | `Unknown "__builtin" ->
-      begin match args with
-        | Const (CStr "invariant") :: args when List.length args > 0 ->
-          List.fold_left (fun d e -> invariant ctx.ask ctx.global d e true) ctx.local args
-        | _ -> failwith "Unknown __builtin."
-      end
-    | `Unknown "exit" ->  raise Deadcode
-    | `Unknown "abort" -> raise Deadcode
-    | `Unknown "__builtin_expect" ->
-      begin match lv with
-        | Some v -> assign ctx v (List.hd args)
-        | _ -> M.bailwith "Strange use of '__builtin_expect' detected --- ignoring."
-      end
-    | `Unknown "spinlock_check" ->
-      begin match lv with
-        | Some x -> assign ctx x (List.hd args)
-        | None -> ctx.local
-      end
-    | `Unknown "LAP_Se_SetPartitionMode" -> begin
-        match ctx.ask (Queries.EvalInt (List.hd args)) with
-        | `Int i when i=1L || i=2L -> ctx.local
-        | `Bot -> ctx.local
-        | _ -> cpa, Flag.make_main fl
-      end
-    (* handling thread creations *)
-    (*       | `Unknown "LAP_Se_CreateProcess" -> begin
-              match List.map (fun x -> stripCasts (constFold false x)) args with
-                | [_;AddrOf id;AddrOf r] ->
-                    let cpa,_ = invalidate ctx.ask ctx.global ctx.local [Lval id; Lval r] in
-                      cpa, fl
-                | _ -> raise Deadcode
-              end *)
     | `ThreadCreate (f,x) -> cpa, Flag.make_main fl
     (* handling thread joins... sort of *)
-    | `ThreadJoin (id,ret_var) ->
-      begin match (eval_rv_with_query ctx.ask gs st ret_var) with
-        | `Int n when n = ID.of_int 0L -> cpa,fl
-        | _      -> invalidate ctx.ask gs st [ret_var]
-      end
-    | `Malloc  -> begin
-        match lv with
-        | Some lv ->
-          let heap_var =
-            if (get_bool "exp.malloc-fail")
-            then AD.join (heap_var !Tracing.current_loc) (AD.null_ptr ())
-            else heap_var !Tracing.current_loc
-          in
-          set_many ctx.ask gs st [(heap_var, `Blob (VD.bot ()));
-                                  (eval_lv ctx.ask gs st lv, `Address heap_var)]
-        | _ -> st
-      end
-    | `Calloc ->
-      begin match lv with
-        | Some lv ->
-          let heap_var = BaseDomain.get_heap_var !Tracing.current_loc in
-          set_many ctx.ask gs st [(AD.from_var heap_var, `Array (CArrays.make 0 (`Blob (VD.bot ()))));
-                                  (eval_lv ctx.ask gs st lv, `Address (AD.from_var_offset (heap_var, `Index (IdxDom.of_int 0L, `NoOffset))))]
-        | _ -> st
-      end
-    | `Unknown "__goblint_unknown" ->
-      begin match args with
-        | [Lval lv] | [CastE (_,AddrOf lv)] ->
-          let st = set ctx.ask ctx.global ctx.local (eval_lv ctx.ask ctx.global st lv) `Top  in
-          st
-        | _ ->
-          M.bailwith "Function __goblint_unknown expected one address-of argument."
-      end
-    (* Handling the assertions *)
-    | `Unknown "__assert_rtn" -> raise Deadcode (* gcc's built-in assert *)
-    | `Unknown "__goblint_check" -> assert_fn ctx (List.hd args) true false
-    | `Unknown "__goblint_commit" -> assert_fn ctx (List.hd args) false true
-    | `Unknown "__goblint_assert" -> assert_fn ctx (List.hd args) true true
-    | `Assert e -> assert_fn ctx e (get_bool "dbg.debug") (not (get_bool "dbg.debug"))
     | _ -> begin
         let lv_list =
           match lv with

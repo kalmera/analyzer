@@ -353,8 +353,8 @@ struct
           | Entry f        -> tf_entry ctx f x
           | Ret (r,fd)     -> tf_ret ctx r fd x
           | Test (p,b)     -> tf_test ctx p b x
-          | ASM _          -> fun _ _ _ _ -> ignore (M.warn "ASM statement ignored."); D.bot ()
-          | Skip           -> fun _ _ _ _ -> D.bot ()
+          | ASM _          -> fun _ _ _ _ -> ignore (M.warn "ASM statement ignored."); ctx.local' x
+          | Skip           -> fun _ _ _ _ -> ctx.local' x
           | SelfLoop       -> fun _ _ _ _ -> D.bot ()
         end edge get set gget gset
       in
