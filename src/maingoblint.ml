@@ -233,6 +233,7 @@ let merge_preprocessed (cpp_file_names, dirName) =
   Cilfacade.ugglyImperativeHack := merged_AST;
   merged_AST
 
+
 (** Perform the analysis over the merged AST.  *)
 let do_analyze merged_AST =
   let module L = Printable.Liszt (Basetype.CilFundec) in
