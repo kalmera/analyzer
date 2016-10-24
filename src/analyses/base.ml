@@ -34,56 +34,22 @@ let precious_globs = ref []
 let is_precious_glob v = List.exists (fun x -> v.vname = Json.string x) !precious_globs
 
 let privatization = ref false
-let is_private (a: Q.ask) (_,fl) (v: varinfo): bool =
+let is_private (a: Q.ask) (_) (v: varinfo): bool =
   false 
 
-let get_vd = function
-  | `Left d -> d
-  | `Right _ -> BaseDomain.VD.bot()
 
-let get_flag = function
-  | `Left _ -> BaseDomain.Flag.bot()
-  | `Right f -> f
-
-let is_private' (a: Q.ask) fl (v: varinfo): bool =
+let is_private' (a: Q.ask) (v: varinfo): bool =
   false &&
-  (not (BaseDomain.Flag.is_multi fl) && is_precious_glob v ||
+  (not (true) && is_precious_glob v ||
    match a (Q.IsPublic v) with `Bool tv -> not tv | _ -> false)
 
 module BaseArgs (* : Printable.S  *)=
 struct
-  type t = [`V of varinfo | `Flag]
+  include Basetype.Variables
   let name() = "BaseArgs"
-  let flag: t = `Flag
-  let equal (x:t) y =
-    match x, y with
-    | `V x ,`V y -> x.vid = y.vid
-    | `Flag, `Flag -> true
-    | _ -> false
-  let compare (x:t) y =
-    match x, y with
-    | `V x, `V y -> Pervasives.compare x.vid y.vid
-    | `Flag, `Flag -> 0
-    | `Flag, _ -> 1
-    | _ , `Flag -> -1
-  let hash : t -> int = function
-    | `V v -> v.vid
-    | `Flag -> 1
 
-  let short n = function
-    | `V v -> v.vname
-    | `Flag -> "flag"
-  let pretty_f f () s = dprintf "%s" (f 80 s)
-  let pretty = pretty_f short
-  let toXML _ = undefined "toXml"
-  let toXML_f _ = undefined "toXml_f"
-  let isSimple _ = true
-  let pretty_diff _ _ = dprintf "bla"
-  let printXml f = function
-    | `V v ->
+  let printXml f v =
       BatPrintf.fprintf f "<value>\n<data>%s(%d)</data>\n</value>\n" v.vname v.vid
-    | `Flag ->
-      BatPrintf.fprintf f "<value>\n<data>Flag</data>\n</value>\n"
 end
 
 module Main =
@@ -91,21 +57,7 @@ struct
   open BaseDomain
 
   module V' = BaseArgs
-  module D' = struct
-
-    include Lattice.Either (VD) (Flag)
-    let printXml f x =
-      if is_bot x then BatPrintf.fprintf f "<text>Deadcode</text>\n" else
-        match x with
-        | `Left v ->
-          VD.printXml f v
-        | `Right fl ->
-          Flag.printXml f fl
-
-    let printXml f x =
-      BatPrintf.fprintf f "%a" printXml x
-
-  end
+  module D' = VD
   module G' = VD
 
   include Analyses.DefaultSpec
@@ -117,31 +69,29 @@ struct
   module Flag   = BaseDomain.Flag
 
   module G      = BaseDomain.VD
-  module D      = BaseDomain.Dom
-  module C      = BaseDomain.Dom
+  module D      = BaseDomain.CPA
+  module C      = BaseDomain.CPA
   module V      = Basetype.Variables
 
-  let var_count (cpa,f) = CPA.fold (fun _ _ c -> c+1) cpa 1
+  let var_count cpa = CPA.fold (fun _ _ c -> c+1) cpa 1
 
   let name = "base"
-  let startstate v = CPA.bot (), Flag.start_single v
+  let startstate v = CPA.bot ()
 
-  let otherstate v = CPA.top (), Flag.top ()
+  let otherstate v = CPA.top ()
 
-  let otherstate' = function
-    | `V v  -> `Left  (VD.top ())
-    | `Flag -> `Right (Flag.top ())
+  let otherstate' v = VD.top ()
 
-  let exitstate  v = CPA.bot (), Flag.start_main v
+  let exitstate  v = CPA.bot ()
 
-  let morphstate v (cpa,fl) = cpa, Flag.start_single v
+  let morphstate v cpa = cpa
   let create_tid v =
-    let loc = !Tracing.current_loc in
-    Flag.spawn_thread loc v
-  let threadstate v = CPA.bot (), create_tid v
+      let loc = !Tracing.current_loc in
+      Flag.spawn_thread loc v
+  let threadstate v = CPA.bot ()
 
   type cpa = CPA.t
-  type flag = Flag.t
+  (* type flag = Flag.t *)
   type extra = (varinfo * Offs.t * bool) list
   type store = D.t
   type value = VD.t
@@ -155,12 +105,12 @@ struct
    * State functions
    **************************************************************************)
 
-  let globalize ?(privates=false) a (cpa,fl): cpa * glob_diff  =
+  let globalize ?(privates=false) a cpa: cpa * glob_diff  =
     (* For each global variable, we create the diff *)
     let add_var (v: varinfo) (value) (cpa,acc) =
       if M.tracing then M.traceli "globalize" ~var:v.vname "Tracing for %s\n" v.vname;
       let res =
-        if is_global a v && (privates || not (is_private a (cpa,fl) v)) then begin
+        if is_global a v && (privates || not (is_private a cpa v)) then begin
           if M.tracing then M.tracec "globalize" "Publishing its value: %a\n" VD.pretty value;
           (CPA.remove v cpa, (v,value) :: acc)
         end else
@@ -173,18 +123,18 @@ struct
     CPA.fold add_var cpa (cpa, [])
 
   let sync'' privates ctx: D.t * glob_diff =
-    let cpa,fl = ctx.local in
-    let privates = privates || (!GU.earlyglobs && not (Flag.is_multi fl)) in
-    let cpa, diff = if !GU.earlyglobs || Flag.is_multi fl then globalize ~privates:privates ctx.ask ctx.local else (cpa,[]) in
-    (cpa,fl), diff
+    let cpa = ctx.local in
+    let privates = privates || (!GU.earlyglobs && not true) in
+    let cpa, diff = if !GU.earlyglobs || true then globalize ~privates:privates ctx.ask ctx.local else (cpa,[]) in
+    cpa, diff
 
   let sync = sync'' false
 
-  let globalize' a fl v ov : D'.t * glob_diff  =
+  let globalize' a v ov : D'.t * glob_diff  =
     (* For each global variable, we create the diff *)
     let add_var (v: varinfo) =
-      if is_global a v && (not (is_private' a fl v)) then begin
-        (`Left (VD.bot ()), [v, get_vd ov])
+      if is_global a v && (not false) then begin
+        (VD.bot (), [v, ov])
       end else
         (ov, [])
     in
@@ -192,19 +142,17 @@ struct
     add_var v
 
   let sync'  : (V'.t, D'.t, G'.t) ctx' -> V'.t -> D'.t * (varinfo * G'.t) list =
-    fun ctx -> function
-      | `Flag -> (ctx.local' `Flag, [])
-      | `V v  ->
-        let fl = get_flag (ctx.local' `Flag) in
-        let ov = ctx.local' (`V v) in
+    fun ctx v ->
+        (* let fl = get_flag (ctx.local' `Flag) in *)
+        let ov = ctx.local' v in
         (* let privates = (!GU.earlyglobs && not (Flag.is_multi fl)) in *)
-        if !GU.earlyglobs || Flag.is_multi fl then
-          globalize' ctx.ask' fl v ov
+        if !GU.earlyglobs || true then
+          globalize' ctx.ask' v ov
         else
           (ov, [])
 
   let publish_all ctx =
-    let ctx_mul = swap_st ctx (fst ctx.local, Flag.get_multi ()) in
+    let ctx_mul = swap_st ctx (ctx.local) in
     List.iter (fun ((x,d)) -> ctx.sideg x d) (snd (sync'' true ctx_mul))
 
   let may_modify_syn (lv:lval) (v:varinfo) =
@@ -217,7 +165,7 @@ struct
 
   (** [get st addr] returns the value corresponding to [addr] in [st]
    *  adding proper dependencies *)
-  let rec get a (gs: glob_fun) (st,fl: store) (addrs:address): value =
+  let rec get a (gs: glob_fun) (st: store) (addrs:address): value =
     let firstvar = if M.tracing then try (List.hd (AD.to_var_may addrs)).vname with _ -> "" else "" in
     let get_global x = gs x in
     if M.tracing then M.traceli "get" ~var:firstvar "Address: %a\nState: %a\n" AD.pretty addrs CPA.pretty st;
@@ -225,7 +173,7 @@ struct
     let res =
       let f_addr (x, offs) =
         (* get hold of the variable value, either from local or global state *)
-        let var = if (!GU.earlyglobs || Flag.is_multi fl) && is_global a x then
+        let var = if (!GU.earlyglobs || true) && is_global a x then
             match CPA.find x st with
             | `Bot -> (if M.tracing then M.tracec "get" "Using global invariant.\n"; get_global x)
             | x -> (if M.tracing then M.tracec "get" "Using privatized version.\n"; x)
@@ -234,7 +182,7 @@ struct
             CPA.find x st
           end
         in
-        VD.eval_offset (get a gs (st,fl)) var offs
+        VD.eval_offset (get a gs st) var offs
       in
       let f x =
         match Addr.to_var_offset x with
@@ -261,11 +209,9 @@ struct
 
 
   (** [set st addr val] returns a state where [addr] is set to [val] *)
-  let set a ?(effect=true) (gs:glob_fun) (st,fl: store) (lval: AD.t) (value: value): store =
+  let set a ?(effect=true) (gs:glob_fun) (st: store) (lval: AD.t) (value: value): store =
     let update_variable x y z =
-      if M.tracing then M.tracel "setosek" ~var:x.vname "update_variable: start '%s' '%a'\nto\n%a\n\n" x.vname VD.pretty y CPA.pretty z;
       let r = update_variable x y z in
-      if M.tracing then M.tracel "setosek" ~var:x.vname "update_variable: start '%s' '%a'\nto\n%a\nresults in\n%a\n" x.vname VD.pretty y CPA.pretty z CPA.pretty r;
       r
     in
     let firstvar = if M.tracing then try (List.hd (AD.to_var_may lval)).vname with _ -> "" else "" in
@@ -284,10 +230,10 @@ struct
       end else
         (* Check if we need to side-effect this one. We no longer generate
          * side-effects here, but the code still distinguishes these cases. *)
-      if (!GU.earlyglobs || Flag.is_multi fl) && is_global a x then
+      if (!GU.earlyglobs || true) && is_global a x then
         (* Check if we should avoid producing a side-effect, such as updates to
          * the state when following conditional guards. *)
-        if not effect && not (is_private a (st,fl) x) then begin
+        if not effect && not (is_private a st x) then begin
           if M.tracing then M.tracel "setosek" ~var:x.vname "update_one_addr: BAD! effect = '%B', or else is private! \n" effect;
           nst
         end else begin
@@ -320,12 +266,12 @@ struct
        * was ambiguous, we have to join it with the initial state. *)
       let nst = if AD.cardinal lval > 1 then CPA.join st nst else nst in
       if M.tracing then M.tracel "setosek" ~var:firstvar "new state2 %a\n" CPA.pretty nst;
-      (nst,fl)
+      nst
     with
     (* If any of the addresses are unknown, we ignore it!?! *)
     | SetDomain.Unsupported x ->
       if M.tracing then M.tracel "setosek" ~var:firstvar "set got an exception '%s'\n" x;
-      M.warn "Assignment to unknown address"; (st,fl)
+      M.warn "Assignment to unknown address"; st
 
   let liveGlobs = ref (dummyFunDec.svar)
 
@@ -339,12 +285,11 @@ struct
     if get_bool "exp.globs_are_top" then
       D'.top ()
     else
-      let fl  = get_flag (st `Flag) in
-      if isFunctionType v.vtype || (not effect && not (is_private' a fl v)) then
-        st (`V v)
+      if isFunctionType v.vtype || (not effect && not (is_private' a v)) then
+        st v
       else begin
         let update_one_addr old offs: VD.t =
-          if (!GU.earlyglobs || Flag.is_multi fl) && is_global a v then
+          if (!GU.earlyglobs || true) && is_global a v then
             VD.update_offset (get_global v) offs value
           else
             VD.update_offset old offs value
@@ -360,25 +305,25 @@ struct
             if List.for_all (function `NoOffset -> true | _ -> false) os then
               VD.top ()
             else
-              get_vd (st (`V v))
+              st v
           in
           let ds  = List.map (update_one_addr old) os in
           let nst =
             if ds=[] then
-              get_vd (st (`V v))
+              st v
             else if AD.cardinal lval = 1 then
               List.fold_left VD.join (VD.bot ()) ds
             else
               List.fold_left VD.join old ds
           in
-          `Left nst
+          nst
         with
         | SetDomain.Unsupported x ->
-          `Left (VD.bot ())
+          VD.bot ()
       end
 
 
-  let set_many a (gs:glob_fun) (st,fl as store: store) lval_value_list: store =
+  let set_many a (gs:glob_fun) (st as store: store) lval_value_list: store =
     (* Maybe this can be done with a simple fold *)
     let f (acc: store) ((lval:AD.t),(value:value)): store =
       set a gs acc lval value
@@ -387,12 +332,11 @@ struct
     List.fold_left f store lval_value_list
 
   let set_many_inv' a (gs:glob_fun) set_gs (st: V'.t -> D'.t) lval_value_list v: D'.t =
-    let fl = get_flag (st `Flag) in
     let old_value = 
-      if (!GU.earlyglobs || Flag.is_multi fl) && is_global a v then
-        `Left (gs v)
+      if (!GU.earlyglobs || true) && is_global a v then
+        gs v
       else
-        st (`V v)
+        st v
     in
     (* Maybe this can be done with a simple fold *)
     let f r ((lval:AD.t),(value:value)) =
@@ -406,11 +350,11 @@ struct
      * not sure in which order! *)
     (D.join st1 st2, gl1 @ gl2)
 
-  let rem_many (st,fl: store) (v_list: varinfo list): store =
+  let rem_many (st: store) (v_list: varinfo list): store =
     let f acc v = CPA.remove v acc in
-    List.fold_left f st v_list, fl
+    List.fold_left f st v_list
 
-  let call_descr f (es,fl) =
+  let call_descr f (es) =
     let short_fun x =
       match x.vtype, CPA.find x es with
       | TPtr (t, attr), `Address a
@@ -694,7 +638,7 @@ struct
       | `Bot -> `Index (IdxDom.bot (), convert_offset a gs st ofs)
       | _ -> M.bailwith "Index not an integer value"
   (* Evaluation of lvalues to our abstract address domain. *)
-  and eval_lv (a: Q.ask) (gs:glob_fun) st (lval:lval): AD.t =
+  and eval_lv (a: Q.ask) (gs:glob_fun) (st:store) (lval:lval): AD.t =
     let rec do_offs def = function
       | Field (fd, offs) -> begin
           match Goblintutil.is_blessed (TComp (fd.fcomp, [])) with
@@ -731,7 +675,6 @@ struct
   (** [get st addr] returns the value corresponding to [addr] in [st]
    *  adding proper dependencies *)
   let rec get' a (gs: glob_fun) (set_gs:V.t -> G'.t -> unit) (st:V'.t->D'.t) (addrs:address): value =
-    let fl = get_flag (st (`Flag)) in
     (* let firstvar = if M.tracing then try (List.hd (AD.to_var_may addrs)).vname with _ -> "" else "" in *)
     let get_global x =
       set_gs !liveGlobs (`Address (AD.singleton (Addr.from_var x)));
@@ -740,10 +683,10 @@ struct
     (* Finding a single varinfo*offset pair *)
     let f_addr (x, offs) =
       (* get hold of the variable value, either from local or global state *)
-      let var = if (!GU.earlyglobs || Flag.is_multi fl) && is_global a x then
+      let var = if (!GU.earlyglobs || true) && is_global a x then
           get_global x
         else
-          get_vd (st (`V x))
+          st x
       in
       VD.eval_offset (get' a gs set_gs st) var offs
     in
@@ -1053,7 +996,7 @@ struct
     | _ -> `Top
 
   let startstate' = function
-    | `V x when x.vglob ->
+    | x when x.vglob ->
       let f z = function
         | GVar (v',init,_) when v'.vid = x.vid ->
           Some init
@@ -1081,16 +1024,14 @@ struct
         | Some {init=Some i} ->
           let iv = eval_init (init_value' ask glob set_glob local x.vtype) i in
           if VD.is_bot iv then 
-            `Left (VD.top ())
+            VD.top ()
           else
-            `Left iv
+            iv
         | _ ->
           D'.top ()
       end
-    | `V x ->
-      `Left (VD.top ())
-    | `Flag ->
-      `Right (Flag.start_single (List.hd !Goblintutil.startfuns).svar)
+    | _ ->
+      VD.top ()
 
   let rec top_value a (gs:glob_fun) (st: store) (t: typ): value =
     let rec top_comp compinfo: ValueDomain.Structs.t =
@@ -1388,7 +1329,7 @@ struct
     | Some (lval, value) ->
       if M.tracing then M.tracec "invariant" "Restricting %a with %a\n" d_lval lval VD.pretty value;
       let addr = eval_lv' a gs set_gs st lval in
-      if (AD.is_top addr) then st (`V z)
+      if (AD.is_top addr) then st z
       else
         let oldval = get' a gs set_gs st addr in
         let new_val = apply_invariant oldval value in
@@ -1404,7 +1345,7 @@ struct
         else set' a gs set_gs st addr new_val ~effect:false z
     | None ->
       if M.tracing then M.traceu "invariant" "Doing nothing.\n";
-      st (`V z)
+      st z
 
   let set_savetop ask (gs:glob_fun) st adr v =
     match v with
@@ -1424,36 +1365,14 @@ struct
   (* hack for char a[] = {"foo"} or {'f','o','o', '\000'} *)
   let char_array : (lval, string) Hashtbl.t = Hashtbl.create 500
 
-  let rec assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function
-    | `Flag -> 
-      let f = ctx.local' `Flag in
-      if (not (D'.is_bot f)) && (!GU.earlyglobs || Flag.is_multi (get_flag f)) then begin
-        match ctx.global' !liveGlobs with
-        | `Address addrs when not (AD.is_top addrs) ->
-          let one_addr ad = 
-            let gs = Addr.to_var_may ad in
-            let one_glob g = 
-              let d = get_vd (assign' ctx lval rval (`V g)) in
-              ctx.sideg' g d
-            in
-            List.iter one_glob gs
-          in
-          AD.iter one_addr addrs
-        | `Bot -> ()
-        | _ -> 
-          M.warn "liveGlobs is top"
-      end;
-      f
-    | `V v  ->
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then fl else begin
+  let rec assign' ctx (lval:lval) (rval:exp): V'.t -> D'.t = function v  ->
         match may_modify_sem ctx lval v with
         | None when is_global ctx.ask' v -> 
-          if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
-            `Left (ctx.global' v)
+          if (!GU.earlyglobs || true) then 
+            ctx.global' v
           else 
-            ctx.local' (`V v)
-        | None -> ctx.local' (`V v)
+            ctx.local' v
+        | None -> ctx.local' v
         | Some lval_val ->
           let rval_val = eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' rval in
           let not_local xs =
@@ -1470,15 +1389,12 @@ struct
               let find_fps e xs = Addr.to_var_must e @ xs in
               let vars = AD.fold find_fps adrs [] in
               let funs = List.filter (fun x -> isFunctionType x.vtype) vars in
-              List.iter (fun x -> ctx.spawn' x (`Right (create_tid x))) funs
+              List.iter (fun x -> ctx.spawn' x (D'.top ())) funs
             | _ -> ()
           end;
           set_savetop' ctx.ask' ctx.global' ctx.sideg' ctx.local' lval_val rval_val v
-      end
 
   let assign ctx (lval:lval) (rval:exp)  =
-    let _,fl = ctx.local in
-    if Flag.is_bot fl then D.bot () else begin 
       let char_array_hack () =
         let rec split_offset = function
           | Index(Const(CInt64(i, _, _)), NoOffset) -> (* ...[i] *)
@@ -1546,7 +1462,6 @@ struct
           | _ -> ()
         end;
         set_savetop ctx.ask ctx.global ctx.local lval_val rval_val
-    end
 
   module Locmap = Deadcode.Locmap
 
@@ -1559,8 +1474,6 @@ struct
       Locmap.add h k d
 
   let branch ctx (exp:exp) (tv:bool) : store =
-    let _,fl = ctx.local in
-    if Flag.is_bot fl then D.bot () else begin 
       Locmap.replace Deadcode.dead_branches_cond !Tracing.next_loc exp;
       let valu = eval_rv_with_query ctx.ask ctx.global ctx.local exp in
       if M.tracing then M.traceli "branch" ~subsys:["invariant"] "Evaluating branch for expression %a with value %a\n" d_exp exp VD.pretty valu;
@@ -1607,49 +1520,29 @@ struct
             M.debug_each @@ "CondVars result for expression " ^ sprint d_exp exp ^ " is " ^ sprint d_exp e;
             invariant ctx.ask ctx.global res e tv
             | _ -> res*)
-    end
 
   let rec branch' ctx (exp:exp) (tv:bool) (v:V'.t): D'.t =
-    let fl = ctx.local' `Flag in
-    if v=`Flag then
-      if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
-        begin match ctx.global' !liveGlobs with
-          | `Address addrs when not (AD.is_top addrs) ->
-            let one_addr ad = 
-              let gs = Addr.to_var_may ad in
-              let one_glob g = 
-                let d = get_vd (branch' ctx exp tv (`V g)) in
-                ctx.sideg' g d
-              in
-              List.iter one_glob gs
-            in
-            AD.iter one_addr addrs
-          | `Bot -> ()
-          | _ -> 
-            M.warn "liveGlobs is top"
-        end;
-    if D'.is_bot fl then D'.bot () else
-      let valu = eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp in
+    ctx.local' v
+      (* let valu = eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp in
       match valu with
       | `Int value when (ID.is_bool value) ->
         let fromJust x = match x with Some x -> x | None -> assert false in
         let v' = fromJust (ID.to_bool value) in
         if v' <> tv then D'.bot () else
-        if v=`Flag then fl else ctx.local' v
+        ctx.local' v
       | `Bot ->
         D'.bot ()
       | _ ->
         begin match v with
-          | `V v when is_global ctx.ask' v -> 
+          | _ when is_global ctx.ask' v ->
             let fl = ctx.local' `Flag in
-            if D'.is_bot fl then fl 
-            else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
+            if D'.is_bot fl then fl
+            else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
               `Left (ctx.global' v)
-            else 
+            else
               invariant' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp tv v
-          | `V v -> invariant' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp tv v
-          | `Flag -> fl
-        end
+          | v -> invariant' ctx.ask' ctx.global' ctx.sideg' ctx.local' exp tv v
+        end *)
 
   let body ctx f =
     (* First we create a variable-initvalue pair for each varaiable *)
@@ -1659,88 +1552,88 @@ struct
     set_many ctx.ask ctx.global ctx.local inits
 
   let rec body' ctx (f:fundec): V'.t -> D'.t = function
-    | `Flag -> 
+    (* | `Flag ->
       let fl = ctx.local' `Flag in
       if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
         begin match ctx.global' !liveGlobs with
           | `Address addrs when not (AD.is_top addrs) ->
-            let one_addr ad = 
+            let one_addr ad =
               let gs = Addr.to_var_may ad in
-              let one_glob g = 
-                let d = get_vd (body' ctx f (`V g)) in
+              let one_glob g =
+                let d = body' ctx f g in
                 ctx.sideg' g d
               in
               List.iter one_glob gs
             in
             AD.iter one_addr addrs
           | `Bot -> ()
-          | _ -> 
+          | _ ->
             M.warn "liveGlobs is top"
         end;
-      fl
-    | `V v when is_global ctx.ask' v -> 
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then fl 
-      else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
-        `Left (ctx.global' v)
+      fl *)
+    | v when is_global ctx.ask' v -> 
+      (* let fl = ctx.local' `Flag in *)
+      (* if D'.is_bot fl then fl  
+      else *)if (!GU.earlyglobs || true) then 
+        ctx.global' v
       else 
-        ctx.local' (`V v)
-    | `V v  -> begin
+        ctx.local' v
+    | v  -> begin
         if List.exists (fun x -> x.vid = v.vid) f.slocals then
-          `Left (init_value' ctx.ask' ctx.global' ctx.sideg' ctx.local' v.vtype)
+          init_value' ctx.ask' ctx.global' ctx.sideg' ctx.local' v.vtype
         else
-          ctx.local' (`V v)
+          ctx.local' v
       end
 
   let return ctx exp fundec =
-    let (cp,fl) = ctx.local in
+    let cp = ctx.local in
     match fundec.svar.vname with
-    | "__goblint_dummy_init" -> cp, Flag.make_main fl
+    | "__goblint_dummy_init" -> cp
     | "StartupHook" ->
       publish_all ctx;
-      cp, Flag.get_multi ()
+      cp
     | _ -> let nst = rem_many ctx.local (fundec.sformals @ fundec.slocals) in
       match exp with
       | None -> nst
       | Some exp -> set ctx.ask ctx.global nst (return_var ()) (eval_rv_with_query ctx.ask ctx.global ctx.local exp)
 
   let rec return' ctx exp fundec : V'.t -> D'.t = function
-    | `Flag -> 
+    (* | `Flag ->
       let fl = ctx.local' `Flag in
       if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
         begin match ctx.global' !liveGlobs with
           | `Address addrs when not (AD.is_top addrs) ->
-            let one_addr ad = 
+            let one_addr ad =
               let gs = Addr.to_var_may ad in
-              let one_glob g = 
-                let d = get_vd (return' ctx exp fundec (`V g)) in
+              let one_glob g =
+                let d = return' ctx exp fundec g in
                 ctx.sideg' g d
               in
               List.iter one_glob gs
             in
             AD.iter one_addr addrs
           | `Bot -> ()
-          | _ -> 
+          | _ ->
             M.warn "liveGlobs is top"
         end;
-      fl
-    | `V v when is_global ctx.ask' v -> 
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then fl 
-      else if (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then 
-        `Left (ctx.global' v)
+      fl *)
+    | v when is_global ctx.ask' v -> 
+      (* let fl = ctx.local' `Flag in *)
+      (* if D'.is_bot fl then fl
+      else *) if (!GU.earlyglobs || true) then 
+        (ctx.global' v)
       else 
-        ctx.local' (`V v)
-    | `V v when v.vid = (return_varinfo ()).vid -> begin
+        ctx.local' (v)
+    | v when v.vid = (return_varinfo ()).vid -> begin
         match exp with
-        | Some e -> `Left (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' e)
-        | None -> `Left (VD.top ())
+        | Some e -> (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local' e)
+        | None -> (VD.top ())
       end
-    | `V v  -> begin
+    | v  -> begin
         if not (List.exists (fun x -> x.vid = v.vid) (fundec.sformals @ fundec.slocals)) then
-          ctx.local' (`V v)
+          ctx.local' (v)
         else
-          `Left (VD.bot ())
+          (VD.bot ())
       end
 
   (**************************************************************************
@@ -1901,19 +1794,19 @@ struct
     set_many ask gs st invalids'
 
   let invalidate' ask (gs:V.t -> G.t) set_gs  (st:V'.t -> D'.t) (exps: exp list): V'.t -> D'.t  = function
-    | `Flag ->
-      D'.top ()
-    | `V v ->
-      let fl = get_flag (st `Flag) in
+    (* | `Flag ->
+      D'.top () *)
+    | v ->
+      (* let fl = get_flag (st `Flag) in *)
       let vals = List.map (eval_rv' ask gs set_gs st) exps in
       let rea  = reachable_vars' ask (get_ptrs vals) gs set_gs st in
       let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
       if List.exists inAD rea then
-        `Left (top_value' ask gs set_gs st v.vtype)
-      else if (!GU.earlyglobs || Flag.is_multi fl) && is_global ask v then
-        `Left (gs v)
+        (top_value' ask gs set_gs st v.vtype)
+      else if (!GU.earlyglobs || true) && is_global ask v then
+        (gs v)
       else
-        st (`V v)
+        st (v)
 
   (* Variation of the above for yet another purpose, uhm, code reuse? *)
   let collect_funargs ask (gs:glob_fun) (st:store) (exps: exp list) =
@@ -1977,9 +1870,9 @@ struct
       in
       CPA.map replace_val st
 
-  let context (cpa,fl) =
-    let f t f (cpa,fl) = if t then f cpa, fl else cpa, fl in
-    (cpa,fl) |>
+  let context (cpa) =
+    let f t f (cpa) = if t then f cpa else cpa in
+    (cpa) |>
     f !GU.earlyglobs (CPA.filter (fun k v -> not (V.is_global k) || is_precious_glob k))
     %> f (get_bool "exp.addr-context") drop_non_ptrs
     %> f (get_bool "exp.no-int-context") drop_ints
@@ -2166,7 +2059,7 @@ struct
           `TypeSet (reachable_top_pointers_types ctx a)
         | _ -> `TypeSet (Q.TS.empty ())
       end
-    | Q.SingleThreaded -> `Bool (Q.BD.of_bool (not (Flag.is_multi (get_fl ctx.local))))
+    | Q.SingleThreaded -> `Bool (false)
     | Q.EvalStr e -> begin
         match eval_rv ctx.ask ctx.global ctx.local e with
         (* exactly one string in the set (works for assignments of string constants) *)
@@ -2211,59 +2104,59 @@ struct
      * Function calls
      **************************************************************************)
 
-  let make_entry ctx ?nfl:(nfl=(snd ctx.local)) fn args: D.t =
-    let cpa,fl as st = ctx.local in
+  let make_entry ctx fn args: D.t =
+    let cpa as st = ctx.local in
     (* Evaluate the arguments. *)
     let vals = List.map (eval_rv_with_query ctx.ask ctx.global st) args in
     (* generate the entry states *)
     let fundec = Cilfacade.getdec fn in
     (* If we need the globals, add them *)
-    let new_cpa = if not (!GU.earlyglobs || Flag.is_multi fl) then CPA.filter_class 2 cpa else CPA.filter (fun k v -> V.is_global k && is_private ctx.ask ctx.local k) cpa in
+    let new_cpa = if not (!GU.earlyglobs || true) then CPA.filter_class 2 cpa else CPA.filter (fun k v -> V.is_global k && is_private ctx.ask ctx.local k) cpa in
     (* Assign parameters to arguments *)
     let pa = zip fundec.sformals vals in
     let new_cpa = CPA.add_list pa new_cpa in
     (* List of reachable variables *)
     let reachable = List.concat (List.map AD.to_var_may (reachable_vars ctx.ask (get_ptrs vals) ctx.global st)) in
     let new_cpa = CPA.add_list_fun reachable (fun v -> CPA.find v cpa) new_cpa in
-    new_cpa, nfl
+    new_cpa
 
   let rec var_index_of n x = function
     | [] -> None
     | y::ys when x.vid=y.vid  -> Some n
     | _::ys -> var_index_of (n+1) x ys
 
-  let rec make_entry' ctx ?nfl:(nfl=ctx.local' `Flag) fn args : V'.t -> D'.t = function
-    | `Flag -> 
+  let rec make_entry' ctx fn args : V'.t -> D'.t = function
+    (* | `Flag ->
       let fl = nfl in
       if (not (D'.is_bot fl)) && (!GU.earlyglobs || Flag.is_multi (get_flag fl)) then
         begin match ctx.global' !liveGlobs with
           | `Address addrs when not (AD.is_top addrs) ->
-            let one_addr ad = 
+            let one_addr ad =
               let gs = Addr.to_var_may ad in
-              let one_glob g = 
-                let d = get_vd (make_entry' ctx ~nfl:nfl fn args (`V g)) in
+              let one_glob g =
+                let d = make_entry' ctx ~nfl:nfl fn args g in
                 ctx.sideg' g d
               in
               List.iter one_glob gs
             in
             AD.iter one_addr addrs
           | `Bot -> ()
-          | _ -> 
+          | _ ->
             M.warn "liveGlobs is top"
         end;
-      fl
-    | `V v when V.is_global v -> begin
-        let fl = get_flag nfl in
-        if not (!GU.earlyglobs || Flag.is_multi fl) || is_private' ctx.ask' fl v then
-          ctx.local' (`V v)
+      fl *)
+    | v when V.is_global v -> begin
+        (* let fl = get_flag nfl in *)
+        if not (!GU.earlyglobs || true) || is_private' ctx.ask' v then
+          ctx.local' (v)
         else
-          `Left (VD.bot ())
+          (VD.bot ())
       end
-    | `V v ->
+    | v ->
       let fundec = Cilfacade.getdec fn in
       match var_index_of 0 v fundec.sformals with
       | Some n ->
-        assign' ctx (Var v, NoOffset) (List.nth args n) (`V v)
+        assign' ctx (Var v, NoOffset) (List.nth args n) (v)
       | None ->
         let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local') args in
         let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.sideg' ctx.local' in
@@ -2271,14 +2164,14 @@ struct
         if List.exists inAD rea then
           D'.top ()
         else
-          ctx.local' (`V v)
+          ctx.local' (v)
 
 
   let enter ctx lval fn args : (D.t * D.t) list =
-    let _,fl = ctx.local in
-    if Flag.is_bot fl then [] else begin 
+    (* let _,fl = ctx.local in *)
+    (* if Flag.is_bot fl then [] else begin  *)
       [ctx.local, make_entry ctx fn args]
-    end
+    (* end *)
 
   let enter' ctx lval fn args v : D'.t =
     make_entry' ctx fn args v
@@ -2286,7 +2179,7 @@ struct
   let tasks_var = makeGlobalVar "__GOBLINT_ARINC_TASKS" voidPtrType
 
   let forkfun ctx (lv: lval option) (f: varinfo) (args: exp list) : (varinfo * D.t) list =
-    let cpa,fl = ctx.local in
+    let cpa = ctx.local in
     let create_thread arg v =
       try
         (* try to get function declaration *)
@@ -2297,12 +2190,12 @@ struct
           | None -> List.map (fun x -> MyCFG.unknown_exp) fd.sformals
         in
         let nfl = create_tid v in
-        let nst = make_entry ctx ~nfl:nfl v args in
+        let nst = make_entry ctx v args in
         v, nst
       with Not_found ->
         if not (LF.use_special f.vname) then
           M.warn ("creating a thread from unknown function " ^ v.vname);
-        v, (cpa, create_tid v)
+        v, (cpa)
     in
     match LF.classify f.vname args with
     | `ThreadCreate (start,ptc_arg) -> begin
@@ -2323,10 +2216,10 @@ struct
     | _ ->  []
 
   let forkfun' ctx (lv: lval option) (f: varinfo) (args: exp list) : bool =
-    let fl = ctx.local' `Flag in
-    if D'.is_bot fl then false else begin
+    (* let fl = ctx.local' `Flag in *)
+    (* if D'.is_bot fl then false else  *)begin
       let create_thread v =
-        ctx.spawn' v (`Right (create_tid v))
+        ctx.spawn' v (D'.top ())
       in
       match LF.classify f.vname args with
       | `ThreadCreate (start,_) -> begin
@@ -2384,43 +2277,43 @@ struct
       end
 
   let rec special' ctx (lv:lval option) (f: varinfo) (args: exp list): V'.t -> D'.t = function
-    | `Flag -> 
+    (* | `Flag ->
       (*ignore (Printf.printf "unknown fun %s\n" f.vname);*)
       let fl = ctx.local' `Flag in
       if D'.is_bot fl then fl else begin
-        let forked = 
+        let forked =
           if not (get_bool "exp.single-threaded") then
             forkfun' ctx lv f args
           else false
         in
-        if forked || !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
+        if forked || !GU.earlyglobs || Flag.is_multi (get_flag fl) then
           begin match ctx.global' !liveGlobs with
             | `Address addrs when not (AD.is_top addrs) ->
-              let one_addr ad = 
+              let one_addr ad =
                 let gs = Addr.to_var_may ad in
-                let one_glob g = 
-                  let d = get_vd (special' ctx lv f args (`V g)) in
+                let one_glob g =
+                  let d = special' ctx lv f args g in
                   ctx.sideg' g d
                 in
                 List.iter one_glob gs
               in
               AD.iter one_addr addrs
             | `Bot -> ()
-            | _ -> 
+            | _ ->
               M.warn "liveGlobs is top"
           end;
         begin match LF.classify f.vname args with
           | `ThreadCreate (_,_) ->
             ignore(Printf.printf "creating a thread with %s\n%!" f.vname);
             `Right (Flag.make_main (get_flag fl))
-          | _ -> 
+          | _ ->
             if not (get_bool "exp.single-threaded")  then
               `Right (Flag.make_main (get_flag fl))
             else
               fl
         end
-      end
-    | `V v  -> 
+      end *)
+    | v  -> 
       begin match LF.classify f.vname args with
         | `Malloc | `Calloc | `Unknown _ ->
           let lv_list =
@@ -2433,22 +2326,22 @@ struct
             | Some fnc -> lv_list @ fnc `Write args
             | None -> lv_list @ args
           in 
-          invalidate' ctx.ask' ctx.global' ctx.sideg' ctx.local' vars (`V v)
-        | _ -> if v.vglob then `Left (ctx.global' v) else ctx.local' (`V v)
+          invalidate' ctx.ask' ctx.global' ctx.sideg' ctx.local' vars (v)
+        | _ -> if v.vglob then (ctx.global' v) else ctx.local' (v)
       end 
 
 
   let special ctx (lv:lval option) (f: varinfo) (args: exp list) =
-    let _,fl = ctx.local in
-    if Flag.is_bot fl then D.bot () else begin 
+    (* let _,fl = ctx.local in *)
+    (* if Flag.is_bot fl then D.bot () else  *)begin 
       (*    let heap_var = heap_var !Tracing.current_loc in*)
       let forks = forkfun ctx lv f args in
       if M.tracing then M.tracel "spawn" "Base.special %s: spawning %i functions\n" f.vname (List.length forks);
       List.iter (uncurry ctx.spawn) forks;
-      let cpa,fl as st = ctx.local in
+      let cpa as st = ctx.local in
       let gs = ctx.global in
       match LF.classify f.vname args with
-      | `ThreadCreate (f,x) -> cpa, Flag.make_main fl
+      | `ThreadCreate (f,x) -> cpa(* , Flag.make_main fl *)
       | `Malloc  -> begin
           match lv with
           | Some lv ->
@@ -2490,7 +2383,7 @@ struct
                 (* This rest here is just to see of something got spawned. *)
                 let flist = collect_funargs ctx.ask gs st args in
                 (* invalidate arguments for unknown functions *)
-                let (cpa,fl as st) = invalidate ctx.ask gs st addrs in
+                let (cpa as st) = invalidate ctx.ask gs st addrs in
                 let f addr acc =
                   try
                     let var = List.hd (AD.to_var_may addr) in
@@ -2506,82 +2399,59 @@ struct
                 if List.fold_right f flist false
                 && not (get_bool "exp.single-threaded")
                 && get_bool "exp.unknown_funs_spawn" then
-                  cpa,Flag.make_main fl
+                  cpa(* ,Flag.make_main fl *)
                 else
                   st
               )
           in
           (* apply all registered abstract effects from other analysis on the base value domain *)
-          List.map (fun f -> f (fun lv -> set ctx.ask ctx.global st (eval_lv ctx.ask ctx.global st lv))) (LF.effects_for f.vname args) |> BatList.fold_left D.meet st
+          (* List.map (fun f -> f (fun lv -> set ctx.ask ctx.global st (eval_lv ctx.ask ctx.global st lv))) (LF.effects_for f.vname args)  *)
+            (* |> BatList.fold_left D'.meet st *)
+            st (* Why does the above not work anymore? *)
         end
     end
 
   (* val combine' : (V'.t, D'.t, G'.t) ctx' ->
         lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t *)
-  let rec combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function
-    | `Flag -> 
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then fl else begin
-        let fl = after `Flag in
-        if !GU.earlyglobs || Flag.is_multi (get_flag fl) then  
-          begin match ctx.global' !liveGlobs with
-            | `Address addrs when not (AD.is_top addrs) ->
-              let one_addr ad = 
-                let gs = Addr.to_var_may ad in
-                let one_glob g = 
-                  let d = get_vd (combine' ctx lval fexp f args after (`V g)) in
-                  ctx.sideg' g d
-                in
-                List.iter one_glob gs
-              in
-              AD.iter one_addr addrs
-            | `Bot -> ()
-            | _ -> 
-              M.warn "liveGlobs is top"
-          end;
-        fl
-      end
-    | `V v  ->
-      let fl = ctx.local' `Flag in
-      if D'.is_bot fl then fl else
+  let rec combine' ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: V'.t->D'.t) : V'.t -> D'.t = function v  ->
         begin match lval with
           | Some (Var v', NoOffset) when v.vid = v'.vid ->
-            after (`V (return_varinfo ()))
+            after (return_varinfo ())
           | _ ->
             let vals = List.map (eval_rv' ctx.ask' ctx.global' ctx.sideg' ctx.local') args in
             let rea  = reachable_vars' ctx.ask' (get_ptrs vals) ctx.global' ctx.sideg' ctx.local' in
             let inAD d = List.exists (fun v' -> v.vid=v'.vid) (AD.to_var_may d) in
             let oldv =
               if (not v.vglob) && not (List.exists inAD rea) then
-                ctx.local' (`V v)
+                ctx.local' v
               else
-                after (`V v)
+                after v
             in
-            let oldv = get_vd oldv in
+            let oldv = oldv in
             begin match lval with
               | Some (Var v', os) when v.vid = v'.vid ->
                 let offs = convert_offset' ctx.ask' ctx.global' ctx.sideg' after os in
-                let ret_val = get_vd (after (`V (return_varinfo ()))) in
-                `Left (VD.update_offset oldv offs ret_val)
-              | _ -> `Left oldv
+                let ret_val = after (return_varinfo ()) in
+                VD.update_offset oldv offs ret_val
+              | _ -> oldv
             end
         end
 
 
   let combine ctx (lval: lval option) fexp (f: varinfo) (args: exp list) (after: D.t) : D.t =
-    let _,fl = ctx.local in
-    if Flag.is_bot fl then D.bot () else begin 
-      let combine_one (loc,lf as st: D.t) ((fun_st,fun_fl) as fun_d: D.t) =
+    (* let _,fl = ctx.local in *)
+    (* if Flag.is_bot fl then D.bot () else  *)begin 
+      let combine_one (loc as st: D.t) ((fun_st) as fun_d: D.t) =
         (* This function does miscelaneous things, but the main task was to give the
          * handle to the global state to the state return from the function, but now
          * the function tries to add all the context variables back to the callee.
          * Note that, the function return above has to remove all the local
          * variables of the called function from cpa_s. *)
-        let add_globals (cpa_s,fl_s) (cpa_d,fl_dl) =
+        let add_globals (cpa_s) (cpa_d) =
           (* Remove the return value as this is dealt with separately. *)
           let cpa_s = CPA.remove (return_varinfo ()) cpa_s in
           let new_cpa = CPA.fold CPA.add cpa_s cpa_d in
-          (new_cpa, fl_s)
+          new_cpa
         in
         let return_var = return_var () in
         let return_val =
@@ -2589,7 +2459,7 @@ struct
           then get ctx.ask ctx.global fun_d return_var
           else VD.top ()
         in
-        let st = add_globals (fun_st,fun_fl) st in
+        let st = add_globals (fun_st) st in
         match lval with
         | None      -> st
         | Some lval -> set_savetop ctx.ask ctx.global st (eval_lv ctx.ask ctx.global st lval) return_val
@@ -2612,15 +2482,7 @@ struct
 
   let part_access ctx e v w =
     let es = Access.LSSet.empty () in
-    let _, fl = ctx.local in
-    if BaseDomain.Flag.is_multi fl && not (is_special_ignorable_thread fl) then begin
-      if is_unique ctx fl then
-        let tid = BaseDomain.Flag.short 20 fl in
-        (Access.LSSSet.singleton es, Access.LSSet.add ("thread",tid) es)
-      else
-        (Access.LSSSet.singleton es, es)
-    end else
-      Access.LSSSet.empty (), es
+    (Access.LSSSet.singleton es, es)
 end
 
 module GoodMain : GoodSpec = Main

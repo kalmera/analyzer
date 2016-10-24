@@ -434,6 +434,7 @@ let lib_funs = ref (StringSet.of_list ["list_empty"; "kzalloc"; "kmalloc"; "__ra
 let add_lib_funs funs = lib_funs := List.fold_right StringSet.add funs !lib_funs
 let use_special fn_name = StringSet.mem fn_name !lib_funs
 
+
 let effects = ref []
 let add_effects f = effects := f :: !effects
 let effects_for fname args = List.filter_map (fun f -> f fname args) !effects

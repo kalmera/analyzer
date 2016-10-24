@@ -297,7 +297,7 @@ struct
       local'  = (fun x -> get (v, cs, x));
       global' = (fun g -> gget g);
       sideg'  = (fun g gv -> gset g gv);
-      spawn'  = (fun v _ -> ignore (get (Function v,CS.empty,S.V'.flag)))
+      spawn'  = (fun v _ -> ())
     }
     and ask x =
       S.query' ctx x

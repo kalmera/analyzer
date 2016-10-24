@@ -638,7 +638,7 @@ sig
 
   module V' : sig
     include Printable.S
-    val flag: t
+    (* val flag: t *)
   end 
   module D' : Lattice.S
   module G' : Lattice.S
