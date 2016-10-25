@@ -1,14 +1,12 @@
+void f(int *x) {
+  *x = 100;
+}
+
 int main(void){
   int a, b;
-  if (a)
-    b = 1;
-  else 
-    b = 2;
+  int *p = &a;
+  f(p);
   
-  if (b)
-    a = 1;
-  else 
-    a = 2;
   
-  return 0;
+  return a;
 }

@@ -4,6 +4,128 @@ open Prelude.Ana
 open GobConfig
 open Analyses
 
+
+module GoodComb (PT: Spec) (VA: GoodSpec) : GoodSpec = 
+struct
+   
+  module V'  = Printable.Option  (VA.V') (struct let name = "pt" end)
+  module D'  = Lattice.Either (VA.D') (PT.D) 
+  module G'  = Lattice.Either (VA.G') (PT.G)
+
+  (* val init     : unit -> unit *)
+  let init () =
+    PT.init ();
+    VA.init ()
+
+  (* val finalize : unit -> unit *)
+  let finalize () = 
+    PT.finalize ();
+    VA.finalize ()
+
+  (* val startstate' : V'.t -> D'.t *)
+  let startstate' : V'.t -> D'.t = function
+    | `Left l   -> `Left (VA.startstate' l)
+    | `Right () -> `Right (PT.startstate (dummyFunDec.svar))
+      
+  (* val otherstate' : V'.t -> D'.t *)
+  let otherstate' :  V'.t -> D'.t = function
+    | `Left l   -> `Left (VA.otherstate' l)
+    | `Right () -> `Right (PT.otherstate (dummyFunDec.svar))
+
+  (* val startvars'  : V'.t list *)
+  let startvars' : V'.t list = [`Right ()]
+
+  let getLeft = function 
+    | `Left x -> x
+    | _       -> undefined "getLeft: not left"
+
+  let getRight = function 
+    | `Right x -> x
+    | _        -> undefined "getRight: not right"
+
+  let cva (ctx: (V'.t, D'.t, G'.t) ctx') : (VA.V'.t, VA.D'.t, VA.G'.t) ctx' = 
+    { ask'      = (ctx.ask')
+    ; local'    = (fun x -> getLeft (ctx.local' (`Left x)))
+    ; global'   = (fun v -> getLeft (ctx.global' v))
+    ; spawn'    = (fun v d -> ctx.spawn' v (`Left d))
+    ; sideg'    = (fun v g -> ctx.sideg' v (`Left g))
+    }
+    
+
+  let cpt (ctx: (V'.t, D'.t, G'.t) ctx') : (PT.D.t, PT.G.t) ctx = 
+    { ask      = (ctx.ask')
+    ; local    = getRight (ctx.local' (`Right ()))
+    ; global   = (fun v -> getRight (ctx.global' v))
+    ; spawn    = (fun v d -> ctx.spawn' v (`Right d))
+    ; sideg    = (fun v g -> ctx.sideg' v (`Right g))
+    ; presub   = []
+    ; postsub  = []
+    ; assign   = (fun ?name:string _ _ -> ())
+    ; split    = (fun _ _ _ -> ())
+    }
+
+  (* val sync'  : (V'.t, D'.t, G'.t) ctx' -> V'.t -> D'.t * (varinfo * G'.t) list *)
+  let sync' ctx = function
+    | `Left l   -> 
+        let (d,v) = VA.sync' (cva ctx) l in 
+        `Left  d, List.map (fun (v,g) -> v, `Left  g) v
+    | `Right () -> 
+        let (d,v) = PT.sync  (cpt ctx) in
+        `Right d, List.map (fun (v,g) -> v, `Right g) v
+  
+  (* val query' : (V'.t, D'.t, G'.t) ctx' -> Queries.t -> Queries.Result.t *)
+  let query' ctx q = 
+    let va = VA.query' (cva ctx) q in
+    let pt = PT.query  (cpt ctx) q in
+    Queries.Result.meet va pt
+
+  (* val assign': (V'.t, D'.t, G'.t) ctx' -> lval -> exp -> V'.t -> D'.t *)
+  let assign' ctx lv exp = function
+  | `Left l   -> `Left  (VA.assign' (cva ctx) lv exp l)
+  | `Right () -> `Right (PT.assign  (cpt ctx) lv exp  )
+  
+  (* val branch': (V'.t, D'.t, G'.t) ctx' -> exp -> bool -> V'.t -> D'.t *)
+  let branch' ctx exp tv = function
+  | `Left l   -> `Left  (VA.branch' (cva ctx) exp tv l)
+  | `Right () -> `Right (PT.branch  (cpt ctx) exp tv  )
+  
+  (* val body'  : (V'.t, D'.t, G'.t) ctx' -> fundec -> V'.t -> D'.t *)
+  let body' ctx f = function
+  | `Left l   -> `Left  (VA.body' (cva ctx) f l)
+  | `Right () -> `Right (PT.body  (cpt ctx) f  )
+  
+  (* val return': (V'.t, D'.t, G'.t) ctx' -> exp option  -> fundec -> V'.t -> D'.t *)
+  let return' ctx rv f = function
+  | `Left l   -> `Left  (VA.return' (cva ctx) rv f l)
+  | `Right () -> `Right (PT.return  (cpt ctx) rv f  )
+
+  (* val special' : (V'.t, D'.t, G'.t) ctx' ->
+      lval option -> varinfo -> exp list -> V'.t -> D'.t *)
+  let special' ctx rv f args = function
+  | `Left l   -> `Left  (VA.special' (cva ctx) rv f args l)
+  | `Right () -> `Right (PT.special  (cpt ctx) rv f args  )
+
+  (* val enter'   : (V'.t, D'.t, G'.t) ctx' ->
+      lval option -> varinfo -> exp list -> V'.t -> D'.t *)
+  let enter' ctx rv f args = function
+  | `Left l   -> `Left  (VA.enter' (cva ctx) rv f args l)
+  | `Right () -> 
+    let ds = PT.enter (cpt ctx) rv f args  in
+    let f x (_,y) = PT.D.join x y in
+    `Right (List.fold_left f (PT.D.bot ()) ds) 
+
+  (* val combine' : (V'.t, D'.t, G'.t) ctx' ->
+      lval option -> exp -> varinfo -> exp list -> (V'.t -> D'.t) -> V'.t -> D'.t *)
+  let combine' ctx rv fe f args af = function
+  | `Left l   -> 
+      let af' v = getLeft (af (`Left v)) in
+      `Left  (VA.combine' (cva ctx) rv fe f args af' l)
+  | `Right () -> 
+      let af' = getRight (af  (`Right ())) in
+      `Right (PT.combine  (cpt ctx) rv fe f args af'  )
+
+end
+
 type spec_modules = { spec : (module Spec)
                     ; dom  : (module Lattice.S)
                     ; glob : (module Lattice.S)

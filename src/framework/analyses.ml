@@ -636,10 +636,7 @@ type ('v, 'd, 'g) ctx' =
 module type GoodSpec =
 sig
 
-  module V' : sig
-    include Printable.S
-    (* val flag: t *)
-  end 
+  module V' : Printable.S
   module D' : Lattice.S
   module G' : Lattice.S
 
@@ -649,6 +646,7 @@ sig
   val startstate' : V'.t -> D'.t
   val otherstate' : V'.t -> D'.t
 
+  val startvars'  : V'.t list
 
   val sync'  : (V'.t, D'.t, G'.t) ctx' -> V'.t -> D'.t * (varinfo * G'.t) list
   val query' : (V'.t, D'.t, G'.t) ctx' -> Queries.t -> Queries.Result.t

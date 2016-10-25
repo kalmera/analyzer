@@ -257,7 +257,7 @@ struct
     ()
 
   (** The main function to preform the selected analyses. *)
-  let analyze' (file: file) (startfuns, exitfuns)  (module Spec : GoodSpec with type V'.t = Base.BaseArgs.t) =
+  let analyze' (file: file) (startfuns, exitfuns)  (module Spec : GoodSpec) =
     Printf.printf "Analyzing with more variables...\n%!";
     (** The Equation system *)
     let module EQSys = FlatFromGoodSpec (Spec) (ListCallString) (Cfg) in
@@ -407,7 +407,9 @@ struct
 
     Goblintutil.startfuns := startfuns;
     let funs = startfuns @ exitfuns in
-    let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty, Goblintutil.return_varinfo ())) funs in
+    let startvars   = 
+      let f x v = MyCFG.Function x.svar ,ListCallString.empty, v in
+      List.concat (List.map (fun x -> List.map (f x) Spec.startvars') funs) in
     (* let startvars   = List.map (fun x -> (MyCFG.Function x.svar ,ListCallString.empty)) startfuns in *)
 
     let local_xml = ref (Result.create 0) in
@@ -433,11 +435,13 @@ struct
     Result.output (lazy !local_xml) !global_xml make_global_fast_xml file
 
 
+  module Comb = MCP.GoodComb (User.PT) (Base.Main)
+
   let analyze file (sf, ef, otf) =
     if (get_bool "runcomb") then
-      analyze  file (sf, ef) (module Base.Main);
+      analyze  file (sf, ef) (module User.PT);
     if (get_bool "runexp") then
-      analyze' file (sf,ef) (module Base.Main)
+      analyze' file (sf,ef) (module Comb)
 end
 
 (** The main function to perform the selected analyses. *)
